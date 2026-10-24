@@ -1,0 +1,19 @@
+# Phase 1-2: environment checks and RAM trimming
+psutil
+
+# Phase 3-4: router, tools (Ollama is called over HTTP)
+httpx
+pymupdf
+python-docx
+duckduckgo-search
+ruff
+pytest
+
+# Phase 6: backend (UI is a static page)
+fastapi
+uvicorn
+
+# Agent reports: Excel, PowerPoint, charts
+openpyxl
+python-pptx
+matplotlib

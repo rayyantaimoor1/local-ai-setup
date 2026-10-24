@@ -1,0 +1,23 @@
+# Private data: never commit (the constitution would block the push anyway)
+memory.db
+memory.db-wal
+memory.db-shm
+audit.jsonl
+audit.1.jsonl
+constitution.json
+
+# Environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+
+# Agent output
+agent-workspace*/
+
+# Secrets, just in case
+.env
+.env.*
+*.pem
+*.key
