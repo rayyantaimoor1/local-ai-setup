@@ -47,8 +47,13 @@ def main() -> int:
     vm = psutil.virtual_memory()
     report(OK, f"RAM: {vm.total / 2**30:.1f} GB total, {vm.available / 2**20:.0f} MB free")
     report(OK, f"threads for inference: {config.NUM_THREAD} (of {os.cpu_count()} logical cores)")
-    if os.environ.get("OLLAMA_NUM_PARALLEL") != "1":
-        report(WARN, "OLLAMA_NUM_PARALLEL is not 1 (set it as a user env var, then restart Ollama)")
+    # Ollama reads these at start-up; measured on this laptop: flash attention + 8-bit KV cache read prompts
+    # 4% faster, write 5% faster and use 0.2 GB less RAM (a 16K context costs what 8K did before)
+    for var, value in config.OLLAMA_ENV.items():
+        if os.environ.get(var) != value:
+            report(WARN, f"{var} is not {value} (set it as a user environment variable, then restart Ollama)")
+        else:
+            report(OK, f"{var}={value}")
 
     import ollama_client
     try:
@@ -58,7 +63,9 @@ def main() -> int:
         return 1
     report(OK, f"Ollama reachable, {len(pulled)} models pulled")
 
-    wanted = {config.ROUTER_MODEL: "router", **{m: c for c, m in config.SPECIALISTS.items()}}
+    wanted = {config.ROUTER_MODEL: "router", **{m: c for c, m in config.SPECIALISTS.items()},
+              config.EMBED_MODEL: "embeddings (routing, document library, recall)",
+              config.VISION_MODEL: "vision (images)"}
     for model, role in wanted.items():
         report(OK if ollama_client.is_pulled(model, pulled) else BAD,
                f"{role}: {model}" + ("" if ollama_client.is_pulled(model, pulled) else f"  -> ollama pull {model}"))

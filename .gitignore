@@ -2,6 +2,9 @@
 memory.db
 memory.db-wal
 memory.db-shm
+vectors.db
+vectors.db-wal
+vectors.db-shm
 audit.jsonl
 audit.1.jsonl
 constitution.json
@@ -21,3 +24,9 @@ agent-workspace*/
 .env.*
 *.pem
 *.key
+
+# Documents the chat creates
+outputs/
+
+# Local editor / assistant settings
+.claude/

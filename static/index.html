@@ -136,7 +136,7 @@
   .opts label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
   .warn { color: var(--amber); }
 
-  /* ---------- agent + tools ---------- */
+  /* ---------- tools ---------- */
   .page-scroll { flex: 1; overflow-y: auto; padding: 18px 20px 28px; }
   .page-inner { max-width: 940px; margin: 0 auto; }
   .page-inner h2 { font: 600 14px var(--mono); margin: 0 0 4px; }
@@ -145,7 +145,6 @@
   .field label { display: block; color: var(--muted); font: 12px var(--mono); margin-bottom: 4px; }
   .field textarea, .field input[type=text], .field input[type=search] { width: 100%; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .agent-actions { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
   .iter { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px; background: var(--panel); overflow: hidden; }
   .iter-head { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); font: 12px var(--mono); flex-wrap: wrap; }
   .iter pre, .out { margin: 0; padding: 10px 12px; max-height: 280px; overflow: auto; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -155,9 +154,48 @@
   .run pre { padding: 6px 0 0; color: var(--text); max-height: 160px; }
   .filebtn { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; font: 12px var(--mono); color: var(--accent); text-decoration: none; display: inline-block; }
   .filebtn:hover { border-color: var(--accent); }
+  .files-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font: 12px var(--mono); color: var(--muted); margin-top: 6px; flex-basis: 100%; }
+  .live .toolstep { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; }
   .toolstep { border-top: 1px solid var(--border); padding: 8px 12px; font: 12px var(--mono); }
   .toolstep summary { cursor: pointer; color: var(--amber); }
   .toolstep pre { max-height: 200px; padding: 6px 0 0; }
+  /* live step timeline above an answer */
+  .timeline { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); margin: 0 0 10px; font: 12px var(--mono); }
+  .timeline > summary { cursor: pointer; padding: 6px 12px; color: var(--muted); list-style: none; display: flex; gap: 8px; align-items: center; }
+  .timeline > summary::before { content: "▸"; } .timeline[open] > summary::before { content: "▾"; }
+  .timeline ol { list-style: none; margin: 0; padding: 0 12px 8px; }
+  .timeline li { padding: 3px 0; border-top: 1px dashed var(--border); }
+  .timeline li:first-child { border-top: 0; }
+  .st-head { display: flex; gap: 8px; align-items: baseline; }
+  .st-icon { width: 14px; flex: none; text-align: center; }
+  .st-label { color: var(--text); }
+  .st-detail { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+  .st-time { color: var(--muted); margin-left: auto; flex: none; }
+  .timeline li.running .st-icon .spin { display: inline-block; vertical-align: -1px; border-color: var(--accent); border-right-color: transparent; }
+  .timeline li.done .st-icon { color: var(--green); }
+  .timeline li.warn .st-icon, .timeline li.warn .st-label { color: var(--amber); }
+  .timeline li.error .st-icon, .timeline li.error .st-label { color: var(--red); }
+  .st-panel { margin: 4px 0 2px 22px; }
+  .st-panel summary { cursor: pointer; color: var(--muted); }
+  .st-panel pre { margin: 4px 0 0; max-height: 220px; overflow: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.45 var(--mono); color: var(--muted); }
+  .codeblock button.preview { right: 52px; color: var(--accent); }
+  .html-preview { margin: -6px 0 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #fff; }
+  .html-preview iframe { display: block; width: 100%; height: 420px; border: 0; background: #fff; }
+  .html-preview .bar2 { display: flex; flex-wrap: wrap; gap: 4px 8px; justify-content: flex-end; align-items: center; padding: 4px 8px; background: var(--panel2); font: 11px var(--mono); color: var(--muted); }
+  .html-preview .bar2 .link-btn { white-space: nowrap; }
+  .imgtray { display: flex; gap: 8px; flex-wrap: wrap; }
+  .imgtray:not(:empty) { margin: 2px 0 8px; }
+  .imgthumb { position: relative; width: 64px; height: 64px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel); }
+  .imgthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .imgthumb button { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: #000a; color: #fff; font-size: 12px; line-height: 20px; padding: 0; }
+  /* orchestration graph: the stages this answer went through, live */
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; padding: 8px 12px 2px; font: 11px var(--mono); }
+  .flow .node { border: 1px solid var(--border); border-radius: 12px; padding: 1px 9px; color: var(--muted); background: var(--bg); white-space: nowrap; }
+  .flow .node.done { color: var(--green); border-color: var(--green); }
+  .flow .node.active { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg); }
+  .flow .node.warn { color: var(--amber); border-color: var(--amber); }
+  .flow .node.error { color: var(--red); border-color: var(--red); }
+  .flow .edge { width: 14px; height: 1px; background: var(--border); flex: none; }
   .answer { margin: 0 0 8px; }
   .findings { margin: 0 0 10px; padding-left: 20px; color: var(--amber); }
   .banner { border: 1px solid var(--amber); color: var(--amber); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font: 12px var(--mono); }
@@ -197,6 +235,9 @@
   .audit-row .detail { color: var(--muted); overflow-wrap: anywhere; flex-basis: 100%; }
   select { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
   code { font: 12px var(--mono); background: var(--panel2); padding: 0 4px; border-radius: 4px; }
+  .banner-bar.lift { background: #f8514922; border-color: var(--red); color: var(--red); }
+  .banner-bar.lift .link-btn { color: var(--red); font-weight: 600; }
+  .lift-card { border-color: var(--red); }
   .menu { position: fixed; z-index: 90; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-width: 190px; max-width: 280px; box-shadow: 0 8px 24px var(--shadow); }
   .menu button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 6px 10px; border-radius: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .menu button:hover, .menu button:focus-visible { background: var(--accent-bg); }
@@ -230,8 +271,13 @@
     <div class="search"><input type="search" id="chatSearch" placeholder="Search chats…  (Ctrl+K)" aria-label="Search chats"></div>
     <div class="nav" id="nav"></div>
     <div class="side-foot">
-      <div class="line"><span>RAM free</span><span id="ram">…</span></div>
+      <div class="line" title="Processor load, all cores"><span>CPU</span><span id="cpu">…</span></div>
+      <div class="bar" id="cpuBar"><i style="width:0"></i></div>
+      <div class="line" title="Memory in use / total. Models: what Ollama and the loaded model hold"><span>RAM</span><span id="ram">…</span></div>
       <div class="bar" id="ramBar"><i style="width:0"></i></div>
+      <div class="line" title="CPU temperature from the Windows thermal sensor. Above 85 °C the laptop slows itself down (throttling)"><span>CPU temp</span><span id="temp">…</span></div>
+      <div class="bar" id="tempBar"><i style="width:0"></i></div>
+      <div class="line"><span>Models in RAM</span><span id="modelRam">…</span></div>
       <div class="line"><span>Threads</span><span id="threads">…</span></div>
       <div class="line"><span>Ollama</span><span id="ollama">…</span></div>
       <details class="roster"><summary>Models</summary><div id="roster"></div></details>
@@ -244,13 +290,13 @@
       <button class="menu-btn" id="menuBtn" aria-label="Open sidebar">☰</button>
       <div class="tabs" role="tablist">
         <button class="tab active" role="tab" data-tab="chat">Chat</button>
-        <button class="tab" role="tab" data-tab="agent">Agent</button>
         <button class="tab" role="tab" data-tab="tools">Tools</button>
         <button class="tab" role="tab" data-tab="constitution">Constitution</button>
       </div>
       <div class="crumb" id="crumb"></div>
     </div>
     <div class="banner-bar" id="banner" role="status"></div>
+    <div class="banner-bar lift" id="liftBanner" role="status"></div>
 
     <section class="view active" id="view-chat">
       <div class="msgs-wrap">
@@ -259,36 +305,20 @@
       </div>
       <div class="composer"><div class="composer-inner">
         <div class="phase idle" id="phase" aria-live="polite"><span class="spin"></span><span id="phaseText"></span></div>
+        <div class="imgtray" id="imgTray" aria-label="Attached images"></div>
         <div class="box">
-          <button class="btn attach" id="attachBtn" type="button" title="Attach a PDF, Word or text/code file: its text is added to your message" aria-label="Attach a file">📎</button>
-          <input type="file" id="attachFile" hidden accept=".pdf,.docx,.txt,.md,.py,.json,.csv,.log,.js,.ts,.html,.css,.yml,.yaml,.toml,.xml,.sql,.sh,.bat,.ps1,.c,.cpp,.h,.java,.go,.rs">
+          <button class="btn attach" id="attachBtn" type="button" title="Attach a PDF, Word or text/code file (its text is added to your message) or up to 3 images / screenshots (read by the vision model). You can also paste an image." aria-label="Attach a file or image">📎</button>
+          <input type="file" id="attachFile" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,.pdf,.docx,.txt,.md,.py,.json,.csv,.log,.js,.ts,.html,.css,.yml,.yaml,.toml,.xml,.sql,.sh,.bat,.ps1,.c,.cpp,.h,.java,.go,.rs">
           <textarea id="input" rows="1" placeholder="Ask anything…" title="Enter to send, Shift+Enter for a new line" aria-label="Message"></textarea>
           <button class="btn primary send" id="send">Send</button>
         </div>
         <div class="opts">
-          <label title="Skip the router and use the large 14B model. Slower, needs ~9 GB of RAM, no tools."><input type="checkbox" id="deep"> Deep (14B)</label>
-          <label title="Also include the daily long-term summaries as background"><input type="checkbox" id="longmem"> Long-term memory</label>
+          <label class="switchy" title="Off: fast answers. On: quality first. The model writes a draft, code in it is checked automatically, the model reviews it against your request and rewrites it, up to 3 times, stopping as soon as nothing is wrong. You watch every step live. The math model reasons fully. Slower (often 2-5x), more careful."><input type="checkbox" id="think"> Deep thinking</label>
+          <label title="The model always stays loaded 3 minutes after an answer (a follow-up skips loading and re-reading); this keeps it 15 minutes. Uses about 2-6 GB of RAM while loaded; another model unloads it."><input type="checkbox" id="warm"> Keep model loaded</label>
+          <label title="Skip the router and use the large 14B model. Slower, needs ~9 GB of RAM, no tools."><input type="checkbox" id="deep"> 14B model</label>
+          <label title="Also include the daily long-term summaries and the most related exchanges from your other chats (found by meaning with the vector database)"><input type="checkbox" id="longmem"> Long-term memory</label>
           <span id="deepWarn" class="warn"></span>
         </div>
-      </div></div>
-    </section>
-
-    <section class="view" id="view-agent">
-      <div class="page-scroll"><div class="page-inner">
-        <h2>Agent</h2>
-        <p class="lede">Give it a goal. It can read PDFs, files and web pages, search, write and run Python, and build Word, Excel, PowerPoint, PDF and chart files. It fixes its own errors, and after 3 failed tries it hands the problem to the 14B model. Anything risky (running programs, deleting, network, paths outside the workspace) needs your approval first.</p>
-        <div class="field"><label for="goal">Goal</label>
-          <textarea id="goal" rows="3" placeholder="e.g. Create a Word report summarizing C:\Users\me\Documents\invoice.pdf"></textarea></div>
-        <div class="suggest" id="agentSuggest" style="justify-content:flex-start;margin:-4px 0 14px"></div>
-        <div class="field"><label for="workspace">Workspace folder (files are written only inside this folder)</label>
-          <input type="text" id="workspace"></div>
-        <div class="agent-actions">
-          <button class="btn primary" id="runAgent">Run agent</button>
-          <label class="opts"><input type="checkbox" id="escalate" checked> Escalate to 14B after 3 failures</label>
-          <label class="opts warn" title="Skips the approval question for risky generated code. It then runs with your full user rights."><input type="checkbox" id="autoApprove"> Auto-approve risky code</label>
-          <span class="phase idle" id="agentPhase" aria-live="polite"><span class="spin"></span><span id="agentPhaseText"></span></span>
-        </div>
-        <div id="agentLog"></div>
       </div></div>
     </section>
 
@@ -323,6 +353,14 @@
             <h2>Web search</h2>
             <form class="row" id="searchForm"><input type="search" id="searchQ" placeholder="Search the web (DuckDuckGo)" aria-label="Search query" style="flex:1;min-width:0"><button class="btn" type="submit">Search</button></form>
             <div class="results" id="searchOut"></div>
+          </div>
+          <div class="card">
+            <h2>Document library <small class="lede">(vector search)</small></h2>
+            <p class="lede">Index a folder of PDFs, Word files, notes or code once; then ask the chat about them ("what do my notes say about…") or search here by meaning, not exact words. Private-looking files are skipped and secrets are blanked. Everything stays on this computer.</p>
+            <div class="row"><input type="text" id="libPath" placeholder="Folder to index, e.g. C:\Users\you\Documents\notes" aria-label="Folder to index" style="flex:1;min-width:0"><button class="btn" id="libIndex">Index</button></div>
+            <form class="row" id="libForm" style="margin-top:8px"><input type="search" id="libQ" placeholder="Search the library by meaning" aria-label="Search the library" style="flex:1;min-width:0"><button class="btn" type="submit">Search</button></form>
+            <div class="lede" id="libInfo" style="margin:8px 0 0">…</div>
+            <pre class="out" id="libOut">Nothing run yet.</pre>
           </div>
           <div class="card">
             <h2>Documents</h2>
@@ -370,8 +408,16 @@
     <section class="view" id="view-constitution">
       <div class="page-scroll"><div class="page-inner">
         <h2>Constitution</h2>
-        <p class="lede">The rules every model and agent follows. <strong>Your data security comes first.</strong> They are enforced in code, so a model cannot talk its way past them, and nothing a file or web page says can grant an exception. Only you can, from this page or a dialog, and every exception is logged.</p>
+        <p class="lede">The rules every model follows. <strong>Your data security comes first.</strong> They are enforced in code, so a model cannot talk its way past them, and nothing a file or web page says can grant an exception. Only you can, from this page or a dialog, and every exception is logged.</p>
         <div class="grid">
+          <div class="card lift-card" style="grid-column:1/-1">
+            <h2>Lift the whole constitution</h2>
+            <p class="lede">Switch off <strong>every</strong> rule, core ones included, for a while: secrets can be pushed, read and sent, and sensitive files are not skipped. A push still waits for your click. Everything is logged, and it ends by itself.</p>
+            <div class="row"><select id="liftMinutes" aria-label="For how long"><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60" selected>60 minutes</option></select>
+              <button class="btn danger" id="liftAll">Lift everything</button>
+              <button class="btn" id="liftRestore">Restore now</button>
+              <span class="lede" id="liftStatus" style="margin:0"></span></div>
+          </div>
           <div class="card" style="grid-column:1/-1"><h2>Rules</h2><div id="rulesList"></div></div>
           <div class="card">
             <h2>Git push settings</h2>
@@ -382,7 +428,7 @@
             <button class="btn primary" id="csSave">Save settings</button>
           </div>
           <div class="card">
-            <h2>Temporary bypass</h2>
+            <h2>Lift one rule</h2>
             <p class="lede">Lift a <em>standard</em> rule for a limited time. Core data-security rules can only be overridden one action at a time, in the dialog for that action.</p>
             <div class="row"><select id="bypassRule" aria-label="Rule to lift" style="flex:1;min-width:0"></select><select id="bypassMinutes" aria-label="For how long"></select><button class="btn danger" id="bypassGrant">Lift rule</button></div>
             <div id="bypassList" style="margin-top:12px"></div>
@@ -424,7 +470,6 @@ const state = {
   chats: [], projects: [], current: null, status: null, filter: '', projectDir: '',
   collapsed: store.get('collapsed', {}),
   chat: { busy: false, abort: null, stick: true, lastText: '' },
-  agent: { busy: false, abort: null, workspace: '' },
 };
 
 /* ================================================================ theme */
@@ -483,11 +528,13 @@ function askText(title, { value = '', placeholder = '', multiline = false, okLab
   });
 }
 function askConfirm(title, message, { okLabel = 'OK', danger = false } = {}) {
-  return openModal({
+  const p = openModal({
     title, content: el('p', {}, message),
     actions: [{ label: 'Cancel', value: false }, { label: okLabel, kind: danger ? 'danger' : 'primary', value: true }],
     cancelValue: false,
   });
+  if (danger) focusCancel();  // a stray Enter must not trigger a dangerous action
+  return p;
 }
 function viewText(title, text, { copyable = true } = {}) {
   const pre = el('pre', { tabindex: '0' }, text);
@@ -589,7 +636,34 @@ function codeBlock(code, lang) {
     try { await navigator.clipboard.writeText(code); copy.textContent = 'copied'; } catch { copy.textContent = 'failed'; }
     setTimeout(() => (copy.textContent = 'copy'), 1200);
   });
-  return el('div', { class: 'codeblock' }, el('span', { class: 'lang' }, lang), copy, el('pre', {}, el('code', {}, code)));
+  const block = el('div', { class: 'codeblock' }, el('span', { class: 'lang' }, lang), copy, el('pre', {}, el('code', {}, code)));
+  if (isHtmlCode(code, lang)) {
+    const btn = el('button', { type: 'button', class: 'preview', 'aria-label': 'Preview this HTML' }, 'preview');
+    btn.addEventListener('click', () => {
+      const open = block.nextElementSibling && block.nextElementSibling.classList.contains('html-preview');
+      if (open) { block.nextElementSibling.remove(); btn.textContent = 'preview'; return; }
+      block.after(htmlPreview(code)); btn.textContent = 'close preview';
+    });
+    block.append(btn);
+  }
+  return block;
+}
+function isHtmlCode(code, lang) {
+  if (/^html?$/i.test(lang)) return true;
+  return !lang && /^\s*(<!doctype html|<html)/i.test(code);
+}
+// The preview runs in a sandboxed frame: scripts work, but it has no access to this app, its storage
+// or the network (the injected policy blocks every request), and it cannot navigate this page.
+const PREVIEW_CSP = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:\">";
+function htmlPreview(code) {
+  const doc = /<head[^>]*>/i.test(code) ? code.replace(/<head[^>]*>/i, (m) => m + PREVIEW_CSP)
+    : /<html[^>]*>/i.test(code) ? code.replace(/<html[^>]*>/i, (m) => m + '<head>' + PREVIEW_CSP + '</head>')
+    : PREVIEW_CSP + code;
+  const frame = el('iframe', { sandbox: 'allow-scripts allow-modals', referrerpolicy: 'no-referrer', title: 'HTML preview' });
+  frame.srcdoc = doc;
+  const widths = [['phone', '390px'], ['tablet', '768px'], ['full', '100%']].map(([label, w]) =>
+    el('button', { type: 'button', class: 'link-btn', onclick: () => { frame.style.width = w; frame.style.margin = '0 auto'; } }, label));
+  return el('div', { class: 'html-preview' }, el('div', { class: 'bar2' }, 'Preview (sandboxed, offline):', ...widths), frame);
 }
 function textBlocks(text, into) {
   let list = null, para = null;
@@ -621,6 +695,8 @@ function renderMarkdown(text, into) {
       const nl = part.indexOf('\n');
       let lang = '', code = part;
       if (nl >= 0 && /^[\w+#.-]*$/.test(part.slice(0, nl).trim())) { lang = part.slice(0, nl).trim(); code = part.slice(nl + 1); }
+      let q;  // "```\npython\n..." - some models put the language on its own line
+      if (!lang && (q = code.match(/^\s*(python|py|html|json|javascript|js|css|bash|sh)[ \t]*\n/i))) { lang = q[1]; code = code.slice(q[0].length); }
       frag.append(codeBlock(code.replace(/\n$/, ''), lang));
     } else if (part.trim()) textBlocks(part, frag);
   });
@@ -744,10 +820,10 @@ async function exportChat(chat) {
 
 /* ==================================================================== chat */
 const SUGGESTIONS = [
-  'Write a Python function that merges overlapping intervals',
+  'Create a Word report on the benefits of unit testing',
+  'Make an Excel sheet of the first 10 square numbers with a bar chart',
   'Show me the files in my project folder',
   'What is 18% of 2,450 plus 130?',
-  'Explain how a mutex differs from a semaphore',
 ];
 function metaRow(meta, getText) {
   const row = el('div', { class: 'meta' });
@@ -757,9 +833,15 @@ function metaRow(meta, getText) {
     if (meta.category !== 'DEEP') row.append(el('span', { class: 'chip' }, `router ${meta.router_seconds}s`));
     row.append(el('span', { class: 'chip' }, `model ${meta.model_seconds}s`), el('span', { class: 'chip' }, `total ${meta.total_seconds}s`));
     if (meta.tool) row.append(el('span', { class: 'chip tool' }, `tool: ${meta.tool}`));
+    if (meta.rounds > 1) row.append(el('span', { class: 'chip' }, `${meta.rounds} steps`));
     if (meta.ram_freed_mb) row.append(el('span', { class: 'chip' }, `RAM freed ${meta.ram_freed_mb} MB`));
+    if (meta.thinking === 'deep') row.append(el('span', { class: 'chip cat' }, 'deep thinking'));
+    if (meta.routed_by === 'embedding') row.append(el('span', { class: 'chip', title: 'Routed in milliseconds by meaning (embedding router), without the router model' }, 'fast route'));
+    if (meta.routed_by === 'follow-up') row.append(el('span', { class: 'chip', title: 'A short follow-up reused the previous route, so the router was skipped' }, 'follow-up'));
+    if (meta.warm) row.append(el('span', { class: 'chip', title: 'The model stays loaded for 10 minutes' }, 'kept loaded'));
   }
   if (getText) row.append(el('button', { class: 'link-btn', type: 'button', onclick: () => copyText(getText()) }, 'copy reply'));
+  if (meta && meta.files && meta.files.length) row.append(el('div', { class: 'files-row' }, 'Files:', meta.files.map(outputLink)));
   return row;
 }
 function nearBottom() { const m = $('#msgs'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
@@ -777,6 +859,11 @@ function addMessage(role, content, meta) {
   const body = el('div', { class: 'body' });
   if (role === 'assistant') renderMarkdown(content || '', body); else body.textContent = content;
   const wrap = el('div', { class: `msg ${role}` }, el('div', { class: 'who' }, role === 'user' ? 'You' : role === 'error' ? 'Error' : 'Assistant'), body);
+  if (role === 'assistant' && meta && meta.steps && meta.steps.length) {
+    const holder = el('div');
+    wrap.insertBefore(holder, body);
+    makeTimeline(holder, { live: false, saved: { steps: meta.steps, total: meta.total_seconds } });
+  }
   if (role === 'assistant') wrap.append(metaRow(meta, () => content));
   $('#msgsInner').append(wrap);
   scrollDown();
@@ -814,9 +901,13 @@ const PHASES = {
   trimming: () => 'Freeing RAM before loading the model…',
   loading_model: (e) => `Loading ${e.model}… the first words can take a minute`,
   generating: (e) => `${e.model} is generating…`,
+  drafting: (e) => `Deep thinking: ${e.model} is writing (watch it in the steps above)…`,
+  reviewing: () => 'Deep thinking: reviewing against your request…',
+  checking: () => 'Checking the code and arithmetic…',
+  reading_image: (e) => `${e.model} is reading the image…`,
+  revising: () => 'Deep thinking: writing an improved version…',
   running_tool: (e) => `Running tool: ${e.tool}(${e.args || ''})`,
-  running_file: (e) => `Running ${e.file}…`,
-  waiting_for_approval: () => 'Waiting for your approval to run the generated code…',
+  waiting_for_approval: () => 'Waiting for your decision on the push…',
 };
 const phaseLabel = (e) => (PHASES[e.phase] || (() => e.phase))(e);
 function makePhase(box, text) {
@@ -828,8 +919,7 @@ function makePhase(box, text) {
   };
 }
 const chatPhase = makePhase($('#phase'), $('#phaseText'));
-const agentPhase = makePhase($('#agentPhase'), $('#agentPhaseText'));
-function updateTitle() { document.title = (state.chat.busy || state.agent.busy) ? '● Local AI' : 'Local AI'; }
+function updateTitle() { document.title = state.chat.busy ? '● Local AI' : 'Local AI'; }
 
 function setChatBusy(busy) {
   state.chat.busy = busy;
@@ -840,11 +930,152 @@ function setChatBusy(busy) {
   if (!busy) chatPhase.stop();
   updateTitle();
 }
+/* Live timeline: every step the server reports appears at once with a running timer; text a step
+   produces (drafts, reviews, reasoning, tool output) streams into its own expandable panel. */
+const ST_ICON = { done: '✓', warn: '!', error: '✕' };
+const fmtSecs = (s) => (s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${s < 10 ? s.toFixed(1) : Math.round(s)}s`);
+/* Orchestration graph: the stages an answer passes through, drawn from its steps. Only stages that
+   actually happened appear; a stage that ran several times shows ×n; the running one glows. */
+const STAGES = [
+  ['route', 'Route', /^(Choosing a specialist|Follow-up|Using the 14B)/],
+  ['vision', 'Vision', /^(Reading (the )?image|Cannot read images)/],
+  ['retrieve', 'Retrieve', /^Picked the relevant parts/],
+  ['memory', 'RAM', /^(Freed memory|Only .* RAM free|.* is not downloaded)/],
+  ['model', 'Draft', /^(Writing (a first draft|the answer)|Continuing|Deciding which tool|Reasoning)/],
+  ['tools', 'Tools', /^(Running |Waiting for your approval)/],
+  ['check', 'Check', /^Checking /],
+  ['review', 'Review', /^Reviewing /],
+  ['revise', 'Revise', /^(Writing version|Kept version)/],
+];
+function stageOf(label) { const st = STAGES.find(([, , re]) => re.test(label || '')); return st ? st[0] : null; }
+function makeFlow() {
+  const box = el('div', { class: 'flow', role: 'img', 'aria-label': 'How this answer was made' });
+  const state = new Map();  // stage -> {count, status}
+  let answer = '';
+  function paint() {
+    const nodes = STAGES.filter(([key]) => state.has(key)).map(([key, name]) => {
+      const st = state.get(key);
+      return el('span', { class: `node ${st.status}`, title: `${name}: ${st.count} step(s)` }, name + (st.count > 1 ? ` ×${st.count}` : ''));
+    });
+    if (answer) nodes.push(el('span', { class: `node ${answer}` }, 'Answer'));
+    box.replaceChildren(...nodes.flatMap((n, i) => (i ? [el('span', { class: 'edge' }), n] : [n])));
+  }
+  return {
+    el: box,
+    update(steps) {
+      state.clear();
+      for (const s of steps) {
+        const key = stageOf(s.label);
+        if (!key) continue;
+        const st = state.get(key) || { count: 0, status: 'done', ids: new Set() };
+        if (!st.ids.has(s.id)) { st.ids.add(s.id); st.count++; }
+        if (s.status === 'running') st.status = 'active';
+        else if ((s.status === 'error' || s.status === 'warn') && st.status !== 'active') st.status = s.status;
+        state.set(key, st);
+      }
+      paint();
+    },
+    answer(status) { answer = status; paint(); },
+  };
+}
+
+function makeTimeline(container, { live = true, saved = null } = {}) {
+  const summary = el('summary', {});
+  const list = el('ol');
+  const flow = makeFlow();
+  const box = el('details', { class: 'timeline' }, summary, list);
+  container.append(flow.el);
+  if (live) box.open = true;
+  container.append(box);
+  const steps = new Map();
+  const t0 = Date.now();
+  let timer = null, finished = false, raf = 0;
+  const dirty = new Set();
+
+  function row(id) {
+    let s = steps.get(id);
+    if (s) return s;
+    const icon = el('span', { class: 'st-icon' }), label = el('span', { class: 'st-label' });
+    const detail = el('span', { class: 'st-detail' }), time = el('span', { class: 'st-time' });
+    const li = el('li', {}, el('div', { class: 'st-head' }, icon, label, detail, time));
+    list.append(li);
+    s = { id, li, icon, label, detail, time, start: Date.now(), status: '', seconds: null, panel: null, pre: null, text: '', auto: true };
+    steps.set(id, s);
+    return s;
+  }
+  const repaintFlow = () => flow.update([...steps.values()].map((s) => ({ id: s.id, label: s.label.textContent, status: s.status })));
+  function paintRow(s) {
+    s.li.className = s.status;
+    s.icon.replaceChildren(s.status === 'running' ? el('span', { class: 'spin' }) : (ST_ICON[s.status] || '·'));
+    s.time.textContent = s.seconds != null ? fmtSecs(s.seconds) : s.status === 'running' ? fmtSecs((Date.now() - s.start) / 1000) : '';
+  }
+  function paintSummary() {
+    const total = finished ? null : (Date.now() - t0) / 1000;
+    const running = [...steps.values()].filter((s) => s.status === 'running').map((s) => s.label.textContent);
+    const n = steps.size;
+    summary.textContent = finished || !live
+      ? `${n} step${n === 1 ? '' : 's'}${saved && saved.total ? ` · ${fmtSecs(saved.total)}` : ''} · show what happened`
+      : `Working · ${fmtSecs(total)}${running.length ? ` · ${running[running.length - 1]}` : ''}`;
+  }
+  function flushText() {
+    raf = 0;
+    for (const s of dirty) { s.pre.textContent = s.text; if (s.panel.open) s.pre.scrollTop = s.pre.scrollHeight; }
+    dirty.clear();
+    scrollDown();
+  }
+  const tl = {
+    step(e) {
+      const s = row(e.id);
+      if (e.label) s.label.textContent = e.label;
+      if (e.detail != null) { s.detail.textContent = e.detail; s.detail.title = e.detail; }
+      if (e.status) s.status = e.status;
+      if (e.seconds != null) s.seconds = e.seconds;
+      if (s.panel && e.status && e.status !== 'running' && s.auto && e.status === 'done') s.panel.open = false;
+      paintRow(s); paintSummary(); repaintFlow(); scrollDown();
+    },
+    answering() { flow.answer('active'); },
+    token(e) {
+      const s = row(e.id);
+      if (!s.panel) {
+        s.pre = el('pre');
+        s.panel = el('details', { class: 'st-panel' }, el('summary', {}, 'show text'), s.pre);
+        s.panel.open = live && s.status === 'running';
+        s.panel.addEventListener('toggle', () => { if (s.panel.open !== (s.status === 'running')) s.auto = false; });
+        s.li.append(s.panel);
+      }
+      s.text += e.text;
+      if (s.text.length > 60000) s.text = '…' + s.text.slice(-60000);
+      dirty.add(s);
+      if (!raf) raf = requestAnimationFrame(flushText);
+    },
+    finish(stopped) {
+      finished = true;
+      clearInterval(timer);
+      for (const s of steps.values()) if (s.status === 'running') { s.status = stopped ? 'error' : 'done'; s.seconds = (Date.now() - s.start) / 1000; paintRow(s); }
+      saved = { total: (Date.now() - t0) / 1000 };
+      repaintFlow(); flow.answer(stopped ? 'error' : 'done');
+      if (!steps.size) { box.remove(); flow.el.remove(); }
+      box.open = false;
+      paintSummary();
+    },
+  };
+  if (live) timer = setInterval(() => { for (const s of steps.values()) if (s.status === 'running') paintRow(s); paintSummary(); }, 500);
+  else {
+    let id = 0;
+    for (const s of saved.steps || []) tl.step({ id: ++id, ...s });
+    flow.answer('done');
+    if (!steps.size) { box.remove(); flow.el.remove(); }
+    paintSummary();
+  }
+  return tl;
+}
+
 async function sendMessage() {
   if (state.chat.busy) { if (state.chat.abort) state.chat.abort.abort(); return; }
   const input = $('#input');
   const text = input.value.trim();
-  if (!text) return;
+  const images = state.images.slice();
+  if (!text && !images.length) return;
   if (!state.current) {
     const chat = await guard(() => api('/api/chats', { method: 'POST', body: {} }));
     if (!chat) return;
@@ -855,9 +1086,17 @@ async function sendMessage() {
   state.chat.lastText = text;
   input.value = ''; autoGrow();
   state.chat.stick = true;
-  addMessage('user', text);
+  addMessage('user', text + (images.length ? `
+
+[${images.length} image(s) attached]` : ''));
+  state.images = []; renderImages();
   const view = addMessage('assistant', '');
   view.body.classList.add('cursor');
+  const live = el('div', { class: 'live' });
+  view.wrap.insertBefore(live, view.wrap.querySelector('.meta'));
+  const steps = el('div');
+  view.wrap.insertBefore(steps, view.body);
+  const timeline = makeTimeline(steps);
   let acc = '', raf = 0, finalMeta = null, stopped = false;
   const paint = () => { raf = 0; renderMarkdown(acc, view.body); scrollDown(); };
   state.chat.abort = new AbortController();
@@ -866,12 +1105,18 @@ async function sendMessage() {
   try {
     await streamSSE('/api/chat/stream', {
       message: text, chat_id: state.current, deep: $('#deep').checked, include_long_memory: $('#longmem').checked,
+      think: $('#think').checked, keep_warm: $('#warm').checked, images,
     }, (e) => {
+      if (e.type === 'token' && !acc) timeline.answering();  // first words of the answer: light up "Answer"
       if (e.type === 'phase') chatPhase.set(phaseLabel(e));
-      else if (e.type === 'thinking') chatPhase.set('Reasoning through the problem…');
+      else if (e.type === 'step') timeline.step(e);
+      else if (e.type === 'step_token') timeline.token(e);
+      else if (e.type === 'thinking') chatPhase.set('Reasoning through the problem (open "Reasoning" above to watch)…');
       else if (e.type === 'token') { acc += e.text; if (!raf) raf = requestAnimationFrame(paint); }
-      else if (e.type === 'reset') { acc = ''; }
+      else if (e.type === 'reset') { acc = ''; if (!raf) raf = requestAnimationFrame(paint); }
       else if (e.type === 'chat') upsertChat(e.chat);
+      else if (e.type === 'files') { live.querySelectorAll('.files-row').forEach((n) => n.remove()); live.append(el('div', { class: 'files-row' }, 'Files:', e.files.map(outputLink))); scrollDown(); }
+      else if (e.type === 'push_approval') { chatPhase.set('Waiting for your decision on the push…'); askPush(e); }
       else if (e.type === 'done') { acc = e.reply; finalMeta = e.meta; if (e.chat) upsertChat(e.chat); }
       else if (e.type === 'error') { view.wrap.remove(); showChatError(e.message); acc = null; }
     }, state.chat.abort.signal);
@@ -880,10 +1125,12 @@ async function sendMessage() {
     else { view.wrap.remove(); showChatError(e.message); acc = null; }
   }
   if (raf) cancelAnimationFrame(raf);
+  timeline.finish(stopped || acc === null);
   view.body.classList.remove('cursor');
   if (acc !== null) {
     const shown = acc || (stopped ? '(stopped before any text arrived)' : '');
     renderMarkdown(shown, view.body);
+    live.querySelectorAll('.files-row').forEach((n) => n.remove());  // the meta row lists them now
     view.wrap.replaceChild(metaRow(finalMeta || (stopped ? { interrupted: true } : null), () => shown), view.wrap.querySelector('.meta'));
   }
   setChatBusy(false);
@@ -905,57 +1152,8 @@ function upsertChat(chat) {
 }
 function autoGrow() { const t = $('#input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 200) + 'px'; }
 
-/* =================================================================== agent */
-function setAgentBusy(busy) {
-  state.agent.busy = busy;
-  const b = $('#runAgent');
-  b.textContent = busy ? 'Stop' : 'Run agent';
-  b.classList.toggle('danger', busy); b.classList.toggle('primary', !busy);
-  if (!busy) agentPhase.stop();
-  updateTitle();
-}
-const TEXT_FILE = /\.(py|txt|md|csv|json|log|html?|css|js|ts|ya?ml|toml|xml|sql|sh|bat|ps1|ini|cfg)$/i;
-const AGENT_EXAMPLES = [
-  'Create a Word report summarizing the PDF at C:\\path\\to\\file.pdf',
-  'Make an Excel sheet of the first 20 square numbers with a bar chart',
-  'Fetch https://example.com and write a one-page PDF summary',
-  'Search my project for TODO comments and put them in a Word table',
-  'Write fibonacci.py that prints the first 20 Fibonacci numbers',
-];
-$('#agentSuggest').replaceChildren(...AGENT_EXAMPLES.map((s) => el('button', { type: 'button', onclick: () => { $('#goal').value = s; $('#goal').focus(); } }, s)));
-
-async function openWorkspaceFile(workspace, path) {
-  const data = await guard(() => api(`/api/workspace/file?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}`));
-  if (data) viewText(path, data.content);
-}
-function workspaceFileButton(workspace, path) {
-  if (TEXT_FILE.test(path)) {
-    return el('button', { class: 'filebtn', type: 'button', title: 'View file', onclick: () => openWorkspaceFile(workspace, path) }, path);
-  }
-  return el('a', { class: 'filebtn', title: 'Download', download: path.split('/').pop(),
-    href: `/api/workspace/download?workspace=${encodeURIComponent(workspace)}&path=${encodeURIComponent(path)}` }, '⬇ ' + path);
-}
+/* ============================================================ push + files */
 function focusCancel() { const b = document.querySelector('.modal .modal-foot button'); if (b) b.focus(); }
-async function askApproval(e) {
-  const code = Object.entries(e.files).map(([p, c]) => `# ${p}\n${c}`).join('\n\n');
-  const titles = (e.rules || []).map((id) => (state.ruleTitles && state.ruleTitles[id]) || id);
-  const p = openModal({
-    title: 'Approve running this code?', wide: true,
-    content: [
-      el('p', {}, `The agent wants to run ${e.file}. It was flagged because it:`),
-      el('ul', { class: 'findings' }, e.findings.map((f) => el('li', {}, f))),
-      titles.length ? el('p', {}, 'Constitution: ' + titles.join(' · ')) : null,
-      el('p', {}, 'Approved code runs with your full user rights. Read it first:'),
-      el('pre', { tabindex: '0' }, code),
-    ],
-    actions: [{ label: 'Decline', value: false }, { label: 'Approve and run', kind: 'danger', value: true }],
-    cancelValue: false,
-  });
-  focusCancel();
-  const ok = await p;
-  await guard(() => api('/api/agent/approve', { method: 'POST', body: { id: e.id, approved: ok } }));
-}
-
 /* One dialog for every push: the user's click is required, and every violated rule has to be overridden by them. */
 function pushDialog({ title, review, violations, host, branch, remote }) {
   const rows = violations.map((v) => ({ v, box: el('input', { type: 'checkbox' }) }));
@@ -1000,80 +1198,18 @@ function pushDialog({ title, review, violations, host, branch, remote }) {
 }
 async function askPush(e) {
   for (;;) {
-    const r = await pushDialog({ title: 'The agent asks to push', review: e.review, violations: e.violations, host: e.host, branch: e.branch, remote: e.remote });
+    const r = await pushDialog({ title: 'The assistant asks to push', review: e.review, violations: e.violations, host: e.host, branch: e.branch, remote: e.remote });
     try {
-      await api('/api/agent/approve', { method: 'POST', body: r ? { id: e.id, approved: true, overrides: r.overrides, confirm_text: r.confirm_text } : { id: e.id, approved: false } });
+      await api('/api/approve', { method: 'POST', body: r ? { id: e.id, approved: true, overrides: r.overrides, confirm_text: r.confirm_text } : { id: e.id, approved: false } });
       return;
     } catch (err) {
       if (!r) return;
-      toast(err.message, 'err');   // e.g. the typed word was wrong: ask again instead of leaving the agent waiting
+      toast(err.message, 'err');   // e.g. the typed word was wrong: ask again instead of leaving the chat waiting
     }
   }
 }
-async function runAgent() {
-  if (state.agent.busy) { if (state.agent.abort) state.agent.abort.abort(); return; }
-  const goal = $('#goal').value.trim();
-  if (!goal) { toast('Describe what the agent should do first.'); $('#goal').focus(); return; }
-  const log = $('#agentLog');
-  log.replaceChildren();
-  const workspace = $('#workspace').value.trim();
-  store.set('workspace', workspace);
-  let card = null, out = null, usedWorkspace = workspace || state.status.default_workspace;
-  state.agent.abort = new AbortController();
-  setAgentBusy(true);
-  agentPhase.set('Starting…');
-  const fileButtons = (list) => list.map((p) => workspaceFileButton(usedWorkspace, p));
-  try {
-    await streamSSE('/api/agent/stream', {
-      goal, workspace: workspace || null, allow_escalation: $('#escalate').checked, auto_approve: $('#autoApprove').checked,
-    }, (e) => {
-      if (e.type === 'phase') agentPhase.set(phaseLabel(e));
-      else if (e.type === 'iteration') {
-        out = el('pre', {});
-        const badge = el('span', { class: 'chip ' + (e.stage === 'escalation' ? 'tool' : 'cat') }, e.stage === 'escalation' ? 'escalation' : 'primary');
-        card = el('div', { class: 'iter' }, el('div', { class: 'iter-head' }, el('strong', {}, `Step ${e.n}`), el('span', { class: 'chip' }, e.model), badge), out);
-        log.append(card);
-        agentPhase.set(`Step ${e.n}: loading ${e.model}…`);
-      } else if (e.type === 'token') { out.textContent += e.text; out.scrollTop = out.scrollHeight; }
-      else if (e.type === 'tool') {
-        card.append(el('details', { class: 'toolstep' }, el('summary', {}, `tool: ${e.name}(${e.args})`), el('pre', {}, e.result || '(empty)')));
-      } else if (e.type === 'files') {
-        if (e.saved.length) card.append(el('div', { class: 'files' }, 'Files written:', fileButtons(e.saved)));
-        if (e.rejected.length) card.append(el('div', { class: 'files warn' }, 'Rejected: ' + e.rejected.join('; ')));
-      } else if (e.type === 'approval') {
-        agentPhase.set('Waiting for your approval…');
-        askApproval(e);
-      } else if (e.type === 'push_approval') {
-        agentPhase.set('Waiting for your decision on the push…');
-        askPush(e);
-      } else if (e.type === 'approval_result') {
-        const what = e.kind === 'push' ? 'the push' : 'running this code';
-        card.append(el('div', { class: 'files ' + (e.approved ? '' : 'warn') }, e.approved ? `You approved ${what}.` : `Declined: ${what} did not happen.`));
-      } else if (e.type === 'run') {
-        const ok = e.returncode === 0;
-        card.append(el('div', { class: 'run ' + (ok ? 'ok' : 'bad') },
-          `${e.file} → ${ok ? 'exit 0 (success)' : 'failed, exit ' + e.returncode}`,
-          el('pre', {}, (e.stdout + (e.stderr ? '\n' + e.stderr : '')).trim() || '(no output)'),
-          e.created && e.created.length ? el('div', { class: 'files' }, 'Created:', fileButtons(e.created)) : null));
-      } else if (e.type === 'escalated') log.append(el('div', { class: 'banner' }, `${e.failures} failures in a row with ${e.from_model}. Handing the problem to the larger ${e.to_model} model.`));
-      else if (e.type === 'done') {
-        const r = e.result; usedWorkspace = r.workspace;
-        const answer = el('div', { class: 'answer body' });
-        if (r.answer) renderMarkdown(r.answer, answer);
-        log.append(el('div', { class: 'result ' + (r.success ? 'ok' : 'bad') },
-          el('h3', {}, r.success ? 'Done' : 'Did not succeed'),
-          r.answer ? answer : el('div', {}, r.message),
-          r.outputs.length ? el('div', { class: 'meta' }, 'Files created:', fileButtons(r.outputs)) : null,
-          el('div', { class: 'meta' }, el('span', { class: 'chip' }, `${r.iterations.length} step(s)`), el('span', { class: 'chip' }, `${r.seconds}s`),
-            r.escalated ? el('span', { class: 'chip tool' }, 'escalated to 14B') : null, el('span', { class: 'chip' }, r.workspace)),
-          r.files.length ? el('div', { class: 'meta' }, 'Scripts:', fileButtons(r.files)) : null));
-      } else if (e.type === 'error') log.append(el('div', { class: 'result bad' }, el('h3', {}, 'Error'), el('div', {}, e.message)));
-    }, state.agent.abort.signal);
-  } catch (e) {
-    log.append(el('div', { class: e.name === 'AbortError' ? 'banner' : 'result bad' }, e.name === 'AbortError' ? 'Stopped.' : e.message));
-  }
-  setAgentBusy(false);
-  state.agent.abort = null;
+function outputLink(name) {
+  return el('a', { class: 'filebtn', title: 'Download', download: name, href: '/api/outputs/download?path=' + encodeURIComponent(name) }, '⬇ ' + name);
 }
 
 /* =================================================================== tools */
@@ -1134,7 +1270,7 @@ async function showMemory() {
 }
 
 /* ===================================================== documents + pages */
-const ATTACH_LIMIT = 6000;   // characters sent into a chat; the models have a small context window
+const ATTACH_LIMIT = 150000;  // characters; the server keeps only the passages relevant to your question
 const MAX_UPLOAD_MB = 30;
 function attachToChat(name, text, note = '') {
   const cut = text.length > ATTACH_LIMIT;
@@ -1143,7 +1279,7 @@ function attachToChat(name, text, note = '') {
   input.value = `--- Attached: ${label} ---\n${text.slice(0, ATTACH_LIMIT)}\n--- end of ${name} ---\n\n${input.value}`;
   autoGrow(); setTab('chat'); input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
-  toast(`${note || 'Attached'} ${cut ? '(trimmed to fit the model). ' : ''}Now type your question and press Enter.`, 'ok');
+  toast(`${note || 'Attached'} ${cut ? '(very long: only the start was attached). ' : ''}Now type your question and press Enter.`, 'ok');
 }
 function uploadDocument(file) {
   if (file.size > MAX_UPLOAD_MB * 1024 * 1024) { toast(`That file is over ${MAX_UPLOAD_MB} MB.`, 'err'); return Promise.resolve(null); }
@@ -1151,12 +1287,44 @@ function uploadDocument(file) {
 }
 async function attachFile() {
   const input = $('#attachFile');
-  const file = input.files[0];
+  const files = [...input.files];
   input.value = '';
-  if (!file) return;
-  toast(`Reading ${file.name}…`);
-  const doc = await uploadDocument(file);
-  if (doc) attachToChat(doc.name, doc.text, `Attached ${doc.name}${doc.pages ? ` (${doc.pages} pages)` : ''}.`);
+  for (const file of files) {
+    if (file.type.startsWith('image/')) { await addImage(file); continue; }
+    toast(`Reading ${file.name}…`);
+    const doc = await uploadDocument(file);
+    if (doc) attachToChat(doc.name, doc.text, `Attached ${doc.name}${doc.pages ? ` (${doc.pages} pages)` : ''}.`);
+  }
+}
+/* images: shrunk in the browser (max 1024 px, the server does it again), shown as thumbnails until sent */
+const MAX_IMAGES = 3;
+state.images = [];
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 1024 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.9));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('not an image')); };
+    img.src = url;
+  });
+}
+async function addImage(file) {
+  if (state.images.length >= MAX_IMAGES) { toast(`At most ${MAX_IMAGES} images per message.`, 'err'); return; }
+  if (file.size > 12 * 1024 * 1024) { toast('That image is over 12 MB.', 'err'); return; }
+  try { state.images.push(await shrinkImage(file)); renderImages(); toast('Image attached: the vision model will read it first. Ask your question and press Enter.', 'ok'); }
+  catch { toast(`${file.name || 'That file'} is not an image this browser can read.`, 'err'); }
+}
+function renderImages() {
+  $('#imgTray').replaceChildren(...state.images.map((src, i) => el('div', { class: 'imgthumb' },
+    el('img', { src, alt: `Attached image ${i + 1}` }),
+    el('button', { type: 'button', 'aria-label': `Remove image ${i + 1}`, onclick: () => { state.images.splice(i, 1); renderImages(); } }, '×'))));
 }
 const docState = { doc: null, page: null };
 function setDocButtons(on) { $('#docCopy').disabled = !on; $('#docSend').disabled = !on; }
@@ -1225,6 +1393,7 @@ async function loadConstitution() {
   $('#bypassRule').replaceChildren(...standard.map((r) => el('option', { value: r.id }, r.title)));
   $('#bypassMinutes').replaceChildren(...OVERRIDE_CHOICES.map((m) => el('option', { value: m }, `${m} minutes`)));
   renderBypasses(data.overrides);
+  setLift(data.lifted_seconds);
   renderMarkdown(data.text, $('#constText'));
   loadAudit();
 }
@@ -1237,7 +1406,8 @@ function renderRules(data) {
       el('div', { class: 'rule-main' },
         el('div', {}, el('strong', {}, r.title), ' ', el('span', { class: 'chip ' + (r.locked ? 'tool' : 'cat') }, r.locked ? '🔒 core' : 'standard')),
         el('div', { class: 'lede', style: 'margin:2px 0 0' }, r.description)),
-      el('label', { class: 'switch', title: r.locked ? 'Core rules cannot be switched off. Override them one action at a time.' : 'Switch this rule on or off' }, box, r.locked ? 'always on' : (r.enabled ? 'on' : 'off')));
+      el('label', { class: 'switch', title: r.locked ? 'Core rules cannot be switched off. Override them one action at a time, or lift the whole constitution.' : 'Switch this rule on or off' },
+        box, data.lifted_seconds > 0 ? 'lifted' : r.locked ? 'always on' : (r.enabled ? 'on' : 'off')));
   }));
 }
 async function toggleRule(id, enabled) {
@@ -1277,6 +1447,33 @@ async function revokeBypass(rule) {
   const res = await guard(() => api('/api/constitution/overrides' + (rule ? `?rule=${encodeURIComponent(rule)}` : ''), { method: 'DELETE' }));
   if (res) { renderBypasses(res.overrides); loadAudit(); }
 }
+async function liftAll() {
+  const minutes = Number($('#liftMinutes').value);
+  if (!await askConfirm('Lift the whole constitution?',
+    `For ${minutes} minutes no rule applies, core rules included: secrets can be pushed, read and sent, and sensitive files are not skipped. A push still waits for your click. Everything is logged.`,
+    { okLabel: 'Lift everything', danger: true })) return;
+  const res = await guard(() => api('/api/constitution/lift-all', { method: 'POST', body: { minutes } }));
+  if (res) { toast('The whole constitution is lifted', 'ok'); setLift(res.lifted_seconds); loadConstitution(); }
+}
+async function restoreAll() {
+  const res = await guard(() => api('/api/constitution/overrides', { method: 'DELETE' }));
+  if (res) { setLift(0); toast('Constitution restored', 'ok'); if (document.querySelector('#view-constitution.active')) loadConstitution(); }
+}
+function setLift(seconds) { state.liftUntil = seconds ? Date.now() + seconds * 1000 : 0; paintLift(); }
+function paintLift() {
+  const left = Math.max(0, ((state.liftUntil || 0) - Date.now()) / 1000);
+  const banner = $('#liftBanner');
+  if (left > 0) {
+    banner.replaceChildren(`Constitution lifted: no rules apply · ${fmtLeft(left)} left `,
+      el('button', { class: 'link-btn', type: 'button', onclick: restoreAll }, 'Restore now'));
+    banner.classList.add('show');
+    $('#liftStatus').textContent = `Lifted: ${fmtLeft(left)} left`;
+  } else {
+    banner.classList.remove('show');
+    $('#liftStatus').textContent = 'The constitution applies.';
+  }
+}
+setInterval(paintLift, 1000);
 async function loadAudit() {
   const data = await guard(() => api('/api/audit?limit=60'));
   if (!data) return;
@@ -1290,21 +1487,37 @@ async function loadAudit() {
 }
 
 /* ======================================================= status + wiring */
+function meter(bar, fraction, low, crit) {
+  bar.className = 'bar' + (fraction >= crit ? ' crit' : fraction >= low ? ' low' : '');
+  bar.firstElementChild.style.width = Math.round(Math.max(0, Math.min(1, fraction)) * 100) + '%';
+}
+async function pollLive() {
+  try {
+    const s = await api('/api/system/live');
+    $('#cpu').textContent = `${Math.round(s.cpu_percent)}%`;
+    meter($('#cpuBar'), s.cpu_percent / 100, 0.7, 0.9);
+    $('#ram').textContent = `${s.ram_used_gb} / ${Math.round(s.ram_total_gb)} GB`;
+    meter($('#ramBar'), s.ram_percent / 100, 0.7, 0.88);
+    $('#modelRam').textContent = s.model_ram_gb >= 0.5 ? `${s.model_ram_gb} GB` : 'none loaded';  // Ollama alone is ~0.1 GB
+    const temp = $('#temp');
+    if (s.cpu_temp_c == null) { temp.textContent = 'no sensor'; meter($('#tempBar'), 0, 1, 1); }
+    else {
+      temp.textContent = `${Math.round(s.cpu_temp_c)} °C`;
+      temp.style.color = s.cpu_temp_c >= 90 ? 'var(--red)' : s.cpu_temp_c >= 80 ? 'var(--amber)' : '';
+      meter($('#tempBar'), (s.cpu_temp_c - 30) / 70, (75 - 30) / 70, (88 - 30) / 70);  // bar spans 30-100 °C
+    }
+  } catch { /* server restarting: keep the last values */ }
+}
 async function pollStatus() {
   try {
     const s = await api('/api/status');
     state.status = s; state.projectDir = s.project_dir;
-    const used = 1 - s.ram_free_mb / s.ram_total_mb;
-    $('#ram').textContent = `${(s.ram_free_mb / 1024).toFixed(1)} / ${(s.ram_total_mb / 1024).toFixed(0)} GB`;
-    const bar = $('#ramBar');
-    bar.className = 'bar' + (s.ram_free_mb < 2000 ? ' crit' : s.ram_free_mb < 5000 ? ' low' : '');
-    bar.firstElementChild.style.width = Math.round(used * 100) + '%';
+    setLift(s.constitution_lifted_seconds);
     $('#threads').textContent = s.threads;
     $('#ollama').textContent = s.ollama_up ? 'running' : 'NOT running';
     $('#ollama').style.color = s.ollama_up ? 'var(--green)' : 'var(--red)';
     $('#roster').replaceChildren(...s.models.map((m) => el('div', { title: m.pulled ? 'pulled' : `not pulled: ollama pull ${m.model}` },
       el('span', { class: 'dot' + (m.pulled ? ' on' : '') }), `${m.role.replace('_TASK', '').toLowerCase()} · ${m.model}`)));
-    if (!$('#workspace').value) $('#workspace').value = store.get('workspace', '') || s.default_workspace;
     if (!$('#repoPath').value) $('#repoPath').value = s.project_dir;
     if (!$('#treePath').value) $('#treePath').value = s.project_dir;
     if (!$('#fsPath').value) $('#fsPath').value = s.project_dir;
@@ -1341,8 +1554,39 @@ $('#memBtn').addEventListener('click', showMemory);
 $('#csSave').addEventListener('click', saveConstSettings);
 $('#bypassGrant').addEventListener('click', grantBypass);
 $('#bypassClear').addEventListener('click', () => revokeBypass(null));
+$('#liftAll').addEventListener('click', liftAll);
+$('#liftRestore').addEventListener('click', restoreAll);
 $('#auditRefresh').addEventListener('click', loadAudit);
 $('#attachBtn').addEventListener('click', () => $('#attachFile').click());
+$('#input').addEventListener('paste', (e) => {
+  const files = [...((e.clipboardData && e.clipboardData.files) || [])].filter((f) => f.type.startsWith('image/'));
+  if (files.length) { e.preventDefault(); files.forEach(addImage); }
+});
+/* document library (vector database) */
+async function refreshLibrary() {
+  try {
+    const l = await api('/api/library');
+    $('#libInfo').textContent = l.passages
+      ? `${l.passages} passages from ${l.files.length} file(s) · ${l.chats_remembered} chat exchanges remembered · ${l.model}`
+      : `Empty: index a folder to start. (${l.chats_remembered} chat exchanges remembered · ${l.model})`;
+  } catch { $('#libInfo').textContent = 'Library unavailable.'; }
+}
+$('#libIndex').addEventListener('click', async () => {
+  const path = $('#libPath').value.trim();
+  if (!path) { toast('Type a folder (or file) to index first.', 'err'); return; }
+  $('#libOut').textContent = 'Indexing… new documents take a moment each; unchanged ones are skipped.';
+  const r = await guard(() => api('/api/library/index', { method: 'POST', body: { path } }));
+  $('#libOut').textContent = r ? r.result : 'Failed (see the message above).';
+  refreshLibrary();
+});
+$('#libForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const query = $('#libQ').value.trim();
+  if (!query) return;
+  $('#libOut').textContent = 'Searching…';
+  const r = await guard(() => api('/api/library/search', { method: 'POST', body: { query } }));
+  $('#libOut').textContent = r ? r.result : 'Failed (see the message above).';
+});
 $('#attachFile').addEventListener('change', attachFile);
 $('#docExtract').addEventListener('click', docExtract);
 $('#docToWord').addEventListener('click', docToWord);
@@ -1361,9 +1605,34 @@ $('#newChat').addEventListener('click', () => newChat(null));
 $('#menuBtn').addEventListener('click', () => document.body.classList.toggle('nav-open'));
 $('#backdrop').addEventListener('click', () => document.body.classList.remove('nav-open'));
 $('#send').addEventListener('click', sendMessage);
-$('#runAgent').addEventListener('click', runAgent);
 $('#deep').addEventListener('change', pollStatus);
+for (const id of ['think', 'warm', 'deep', 'longmem']) {
+  $('#' + id).checked = store.get('opt_' + id, false);
+  $('#' + id).addEventListener('change', () => store.set('opt_' + id, $('#' + id).checked));
+}
 $('#input').addEventListener('input', autoGrow);
+// Prewarm: while you type, the server loads the model your message will need first (only when RAM
+// allows and nothing else is running), so pressing Send skips most of the loading wait.
+let prewarmTimer = 0, prewarmKey = '', prewarmAt = 0;
+$('#input').addEventListener('input', () => {
+  clearTimeout(prewarmTimer);
+  prewarmTimer = setTimeout(() => {
+    const text = $('#input').value.trim();
+    if (state.chat.busy || text.length < 6) return;
+    const key = `${state.current}|${$('#deep').checked}|${$('#think').checked}|${text.slice(0, 40)}`;
+    if (key === prewarmKey && Date.now() - prewarmAt < 90000) return;
+    if (Date.now() - prewarmAt < 4000) return;
+    prewarmKey = key; prewarmAt = Date.now();
+    api('/api/prewarm', { method: 'POST', body: { message: text, chat_id: state.current, deep: $('#deep').checked, think: $('#think').checked } })
+      .then((r) => { if (r && r.started) chatPhaseHint(`Loading ${r.model} while you type…`); })
+      .catch(() => {});
+  }, 700);
+});
+function chatPhaseHint(text) {
+  if (state.chat.busy) return;
+  $('#phase').classList.remove('idle'); $('#phaseText').textContent = text;
+  setTimeout(() => { if (!state.chat.busy) $('#phase').classList.add('idle'); }, 4000);
+}
 $('#input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); } });
 $('#chatSearch').addEventListener('input', (e) => { state.filter = e.target.value; renderNav(); });
 document.addEventListener('keydown', (e) => {
@@ -1381,7 +1650,10 @@ document.addEventListener('keydown', (e) => {
     $('#msgsInner').replaceChildren(el('div', { class: 'msg error' }, el('div', { class: 'body' }, e.message)));
   }
   pollStatus();
+  pollLive();
+  refreshLibrary();
   setInterval(() => { if (!document.hidden) pollStatus(); }, 5000);
+  setInterval(() => { if (!document.hidden) pollLive(); }, 2000);
 })();
 </script>
 </body>

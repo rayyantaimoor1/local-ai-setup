@@ -34,11 +34,21 @@ def _blocks(content) -> list:
         return []
     if isinstance(content, str):
         return [("text", para.strip()) for para in content.split("\n\n") if para.strip()]
-    if isinstance(content, dict):
-        return [("image", content)] if "image" in content else [("text", str(content))]
+    if isinstance(content, dict):  # explicit, unambiguous blocks: {"text"|"bullets"|"table"|"image": ...}
+        if "image" in content:
+            return [("image", content)]
+        if "table" in content:
+            return [("table", [list(r) for r in content["table"]])]
+        if "bullets" in content:
+            return [("bullets", [str(b) for b in content["bullets"]])]
+        if "text" in content:
+            return _blocks(str(content["text"]))
+        return [("text", str(content))]
     if isinstance(content, (list, tuple)):
         if not content:
             return []
+        if all(isinstance(x, dict) for x in content):
+            return [b for item in content for b in _blocks(item)]
         if all(isinstance(x, str) for x in content):
             return [("bullets", list(content))]
         if all(isinstance(x, (list, tuple)) for x in content):

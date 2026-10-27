@@ -172,12 +172,16 @@ class GraphMemory:
 
     def get_messages(self, chat_id: str, limit: Optional[int] = None) -> list:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT role, content, meta, ts FROM messages WHERE chat_id=? ORDER BY id", (chat_id,)
-            ).fetchall()
-        msgs = [{"role": r["role"], "content": r["content"],
+            if limit:  # only the newest rows: a long chat is not read in full on every request
+                rows = self._conn.execute(
+                    "SELECT * FROM (SELECT id, role, content, meta, ts FROM messages WHERE chat_id=? "
+                    "ORDER BY id DESC LIMIT ?) ORDER BY id", (chat_id, int(limit))).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT role, content, meta, ts FROM messages WHERE chat_id=? ORDER BY id", (chat_id,)
+                ).fetchall()
+        return [{"role": r["role"], "content": r["content"],
                  "meta": json.loads(r["meta"]), "ts": r["ts"]} for r in rows]
-        return msgs[-limit:] if limit else msgs
 
 
 # --- rendering helpers -------------------------------------------------------
@@ -324,10 +328,10 @@ class MemoryManager:
     def add_message(self, chat_id: str, role: str, content: str, meta: Optional[dict] = None) -> None:
         self.graph.add_message(SESSION_PREFIX + chat_id, role, content, meta)
 
-    def get_messages(self, chat_id: str) -> list:
+    def get_messages(self, chat_id: str, limit: Optional[int] = None) -> list:
         if self.graph.get_node(SESSION_PREFIX + chat_id) is None:
             raise KeyError(chat_id)
-        return self.graph.get_messages(SESSION_PREFIX + chat_id)
+        return self.graph.get_messages(SESSION_PREFIX + chat_id, limit)
 
     # --- rolling session memory ---------------------------------------------
     def append_session_turn(self, chat_id: str, user_message: str, category: str, reply: str) -> None:
@@ -390,9 +394,10 @@ class MemoryManager:
                 for x in nodes]
 
     def gather_for_summary(self) -> list:
-        """(node_id, text) for every Project and Session node that has content."""
+        """(node_id, text) for every Project and Session node that has content, most recently updated first."""
         items = []
-        for node in self.graph.nodes_of_kind("Project") + self.graph.nodes_of_kind("Session"):
+        nodes = self.graph.nodes_of_kind("Project") + self.graph.nodes_of_kind("Session")
+        for node in sorted(nodes, key=lambda n: n["updated"], reverse=True):
             p = node["props"]
             label = p.get("name") or p.get("title") or node["id"]
             body = _render({k: v for k, v in p.items() if k in ("notes", "topics", "history")})

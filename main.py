@@ -1,7 +1,7 @@
 """FastAPI backend. Bound to 127.0.0.1 only; no auth by design."""
 import json
 import threading
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import anyio
@@ -14,12 +14,16 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import agent_engine
 import config
 import constitution
+import documents
+from approvals import approvals
 import ollama_client
 import router_engine
+import semantic
+import sysmon
 import tools
+import vision
 from graph_memory import MemoryManager
 from ollama_client import OllamaError
 
@@ -30,7 +34,13 @@ GENERAL_FACTS = {
     "owner": "Scorpion (Muhammad Rayyan Taimoor Khan)",
 }
 
-app = FastAPI(title="Local AI")
+@asynccontextmanager
+async def _lifespan(_app):
+    threading.Thread(target=_warm_up, daemon=True).start()  # defined below; runs once the app starts
+    yield
+
+
+app = FastAPI(title="Local AI", lifespan=_lifespan)
 # Defeats DNS-rebinding: only loopback Host headers are served.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
 
@@ -59,9 +69,14 @@ memory.seed_general(GENERAL_FACTS)
 # Ollama runs one request at a time (OLLAMA_NUM_PARALLEL=1, 16 GB RAM).
 GEN_LOCK = threading.Lock()
 
-# Folders the agent has used; only these can be browsed through /api/workspace/file.
-KNOWN_WORKSPACES = {str(config.DEFAULT_WORKSPACE.resolve())}
-MAX_VIEW_BYTES = 200_000
+
+def _warm_up() -> None:
+    """At start-up, in the background: embed the router's examples (once per change) and load the small
+    embedding model, so the first message is routed in milliseconds instead of waiting for both."""
+    try:
+        semantic.route("hello", router_engine.ROUTE_EXAMPLES)
+    except Exception:  # Ollama not up yet or model missing: routing falls back to the router model
+        pass
 
 
 # --- request models ------------------------------------------------------------
@@ -72,14 +87,17 @@ class ChatRequest(BaseModel):
     session_key: Optional[str] = None  # legacy alias for chat_id
     project_key: Optional[str] = None
     include_long_memory: bool = False
+    deep: bool = False  # use the 14B model
+    think: bool = False  # deep thinking on (slower, more careful) / off (fast)
+    keep_warm: bool = False  # keep the model loaded after the answer (faster follow-ups, uses RAM)
+    images: list[str] = []  # base64 images (or data: URLs) for the vision model
+
+
+class PrewarmRequest(BaseModel):
+    message: str = ""
+    chat_id: Optional[str] = None
     deep: bool = False
-
-
-class AgentRequest(BaseModel):
-    goal: str
-    workspace: Optional[str] = None
-    allow_escalation: bool = True
-    auto_approve: bool = False  # skip the "may I run this?" question for risky generated code
+    think: bool = False
 
 
 class ApproveRequest(BaseModel):
@@ -203,6 +221,45 @@ def _locked(factory, cancel: threading.Event):
         GEN_LOCK.release()
 
 
+def _recent_history(chat_id: str) -> tuple:
+    """(the last few real messages as text, the previous answer's category).
+
+    Re-injecting the actual recent conversation keeps small models on track across turns; the
+    rolling memory summary alone (one short line per turn) lost too much.
+    """
+    messages = [m for m in memory.get_messages(chat_id, limit=config.HISTORY_MESSAGES * 3) if m["role"] in ("user", "assistant")]
+    lines = []
+    for m in messages[-config.HISTORY_MESSAGES:]:
+        content = " ".join(m["content"].split())
+        if len(content) > config.HISTORY_MESSAGE_CHARS:
+            content = content[:config.HISTORY_MESSAGE_CHARS] + " …"
+        lines.append(f"{'User' if m['role'] == 'user' else 'Assistant'}: {content}")
+    history = "\n".join(lines)
+    if len(history) > config.HISTORY_TOTAL_CHARS:
+        history = "…" + history[-config.HISTORY_TOTAL_CHARS:]
+    prev = next((m["meta"].get("category") for m in reversed(messages)
+                 if m["role"] == "assistant" and m["meta"].get("category")), None)
+    return history, prev
+
+
+def _prev_tools(chat_id: str) -> list:
+    """The tool list the previous answer in this chat offered (see process_request's prev_tools)."""
+    for m in reversed(memory.get_messages(chat_id, limit=4)):
+        if m["role"] == "assistant":
+            return m["meta"].get("toolset") or []
+    return []
+
+
+def _with_recall(context: str, message: str, chat_id: str) -> str:
+    """Add the most related exchanges from OTHER chats (vector search), when long-term memory is on."""
+    question = router_engine._ATTACHMENT.sub(" ", message).strip()[:1000]
+    hits = semantic.recall(question, exclude_chat=chat_id) if question else []
+    if not hits:
+        return context
+    lines = "\n".join("· " + " ".join(h["text"].split())[:400] for h in hits)
+    return (context + "\n\n" if context else "") + "[Related from earlier chats]\n" + lines
+
+
 def _chat_events(req: ChatRequest, cancel: threading.Event):
     """Chat pipeline: persist messages + memory around the router's events."""
     try:
@@ -212,14 +269,25 @@ def _chat_events(req: ChatRequest, cancel: threading.Event):
         return
     chat_id = chat["id"]
     yield {"type": "chat", "chat": chat}
-    memory.add_message(chat_id, "user", req.message)
+    history, prev_category = _recent_history(chat_id)
+    try:
+        images = [vision.prepare_image(i) for i in req.images[:config.VISION_MAX_IMAGES]]
+    except ValueError as exc:
+        yield {"type": "error", "message": str(exc)}
+        return
+    note = f"\n\n[{len(images)} image(s) attached]" if images else ""  # images themselves are not stored
+    memory.add_message(chat_id, "user", req.message + note)
     context = memory.build_context(chat_id, include_long_memory=req.include_long_memory)
+    if req.include_long_memory:
+        context = _with_recall(context, req.message, chat_id)
 
     partial: list = []
     finished = False
     try:
         for event in _locked(lambda: router_engine.process_request(
-                req.message, context, req.deep, cancel), cancel):
+                req.message, context, req.deep, cancel, think=req.think, history=history,
+                prev_category=prev_category, keep_warm=req.keep_warm, images=images,
+                prev_tools=_prev_tools(chat_id), conversation_key=chat_id), cancel):
             kind = event["type"]
             if kind == "token":
                 partial.append(event["text"])
@@ -228,6 +296,9 @@ def _chat_events(req: ChatRequest, cancel: threading.Event):
             elif kind == "done":
                 finished = True
                 memory.add_message(chat_id, "assistant", event["reply"], event["meta"])
+                # for "related from earlier chats" later; in the background so the answer is not delayed
+                threading.Thread(target=semantic.remember_turn, args=(chat_id, req.message, event["reply"]),
+                                 daemon=True).start()
                 memory.append_session_turn(chat_id, req.message, event["meta"]["category"], event["reply"])
                 event["chat"] = memory.autotitle(chat_id, req.message)
             elif kind == "error":
@@ -251,83 +322,91 @@ async def chat_stream(req: ChatRequest):
 def chat(req: ChatRequest):
     cancel = threading.Event()
     for event in _chat_events(req, cancel):
-        if event["type"] == "error":
+        if event["type"] == "push_approval":  # no UI to ask here, and pushes are never automatic
+            approvals.decide(event["id"], False)
+        elif event["type"] == "error":
             raise HTTPException(503, event["message"])
-        if event["type"] == "done":
+        elif event["type"] == "done":
             return {"reply": event["reply"], **event["meta"], "chat": event["chat"]}
     raise HTTPException(500, "No reply produced.")
 
 
-# --- agent --------------------------------------------------------------------------
-
-def _agent_events(req: AgentRequest, cancel: threading.Event):
-    workspace = Path(req.workspace).expanduser() if req.workspace else config.DEFAULT_WORKSPACE
-    KNOWN_WORKSPACES.add(str(workspace.resolve()))
-    yield from _locked(lambda: agent_engine.run_agent(
-        req.goal, workspace, req.allow_escalation, cancel, req.auto_approve), cancel)
+_PREWARMING = threading.Lock()
 
 
-@app.post("/api/agent/stream")
-async def agent_stream(req: AgentRequest):
-    cancel = threading.Event()
-    return _sse_response(_agent_events(req, cancel), cancel)
+@app.post("/api/prewarm")
+def prewarm(body: PrewarmRequest):
+    """Load the model the message being typed will need first, so sending it skips the load.
+
+    Only when nothing is generating, the model is not loaded yet, and enough RAM is free."""
+    prev = None
+    if body.chat_id:
+        try:
+            prev = _recent_history(body.chat_id)[1]
+        except KeyError:
+            prev = None
+    target = router_engine.prewarm_target(body.message, prev, body.deep, body.think)
+    if not target:
+        return {"started": False, "reason": "nothing to prewarm"}
+    model, num_ctx, need_gb = target
+    if GEN_LOCK.locked():
+        return {"started": False, "reason": "busy", "model": model}
+    free_gb = psutil.virtual_memory().available / 2**30
+    if free_gb < need_gb:
+        return {"started": False, "reason": f"only {free_gb:.1f} GB free", "model": model}
+    if any(m == model or m.split(":")[0] == model for m in ollama_client.loaded_models()):
+        return {"started": False, "reason": "already loaded", "model": model}
+    if not _PREWARMING.acquire(blocking=False):
+        return {"started": False, "reason": "already prewarming", "model": model}
+
+    def load():
+        try:
+            if model != config.ROUTER_MODEL:  # the small router can sit next to a specialist kept for follow-ups
+                ollama_client.evict_except([model, config.EMBED_MODEL])
+            ollama_client.preload(model, num_ctx, config.PREWARM_KEEP_ALIVE)
+        finally:
+            _PREWARMING.release()
+    threading.Thread(target=load, daemon=True).start()
+    return {"started": True, "model": model}
 
 
-@app.post("/api/agent/run")
-def agent_run(req: AgentRequest):
-    cancel = threading.Event()
-    for event in _agent_events(req, cancel):
-        if event["type"] in ("approval", "push_approval"):  # no UI to ask: declined (pushes are never automatic)
-            agent_engine.approvals.decide(event["id"], False)
-        elif event["type"] == "error":
-            raise HTTPException(503, event["message"])
-        elif event["type"] == "done":
-            return event["result"]
-    raise HTTPException(500, "The agent produced no result.")
-
-
-def _workspace_target(workspace: str, path: str) -> Path:
-    """A file inside a workspace the agent has used, or an HTTP error."""
-    root = Path(workspace).expanduser()
-    if str(root.resolve()) not in KNOWN_WORKSPACES:
-        raise HTTPException(403, "That folder is not an agent workspace.")
-    try:
-        target = agent_engine._resolve_in_workspace(root, path)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if not target.is_file():
-        raise HTTPException(404, f"Not found: {path}")
-    return target
-
-
-@app.get("/api/workspace/file")
-def workspace_file(workspace: str, path: str):
-    """Read back a text file the agent wrote (confined to a workspace the agent has used)."""
-    data = _workspace_target(workspace, path).read_bytes()[:MAX_VIEW_BYTES]
-    return {"path": path, "content": data.decode("utf-8", errors="replace")}
-
-
-@app.get("/api/workspace/download")
-def workspace_download(workspace: str, path: str):
-    """Download any file the agent made (Word, Excel, PDF, images...), confined the same way."""
-    target = _workspace_target(workspace, path)
-    return FileResponse(target, filename=target.name)
-
-
-@app.post("/api/agent/approve")
-def agent_approve(body: ApproveRequest):
-    """Answer the agent's "may I run this code / push this branch?" question."""
+@app.post("/api/approve")
+def approve(body: ApproveRequest):
+    """Answer a pending "may I push this branch?" question from the chat."""
     overrides = []
     if body.approved and body.overrides:
         try:
             overrides = constitution.check_overrides(body.overrides, body.confirm_text)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
-    if not agent_engine.approvals.decide(body.id, body.approved, overrides):
+    if not approvals.decide(body.id, body.approved, overrides):
         raise HTTPException(404, "That approval request is no longer pending.")
     if overrides:
-        constitution.audit("override_used", rules=overrides, via="agent approval", approval=body.id)
+        constitution.audit("override_used", rules=overrides, via="chat push dialog", approval=body.id)
     return {"id": body.id, "approved": body.approved, "overrides": overrides}
+
+
+# --- documents the chat created (outputs folder) ----------------------------------------------
+
+@app.get("/api/outputs")
+def list_outputs():
+    files = sorted(documents.outputs_dir().iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    return {"folder": str(documents.outputs_dir()),
+            "files": [{"name": p.name, "kb": max(1, p.stat().st_size // 1024)} for p in files if p.is_file()]}
+
+
+@app.get("/api/outputs/download")
+def download_output(path: str):
+    """Download a created document. Confined to the outputs folder."""
+    try:
+        target = documents.resolve_output(path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not target.is_file():
+        raise HTTPException(404, f"Not found: {path}")
+    # Always a download, never rendered here: a created .html page must not run inside this app's origin.
+    return FileResponse(target, filename=target.name, content_disposition_type="attachment",
+                        headers={"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
 
 
 # --- chats and projects (sidebar) -------------------------------------------------------
@@ -379,6 +458,7 @@ def delete_chat(chat_id: str):
         memory.delete_chat(chat_id)
     except KeyError as exc:
         raise _not_found(exc)
+    semantic.forget_chat(chat_id)  # deleted means deleted: also from the recall index
     return {"deleted": chat_id}
 
 
@@ -397,10 +477,14 @@ def update_project(key: str, body: ProjectUpdate):
 
 @app.delete("/api/projects/{key}")
 def delete_project(key: str, delete_chats: bool = False):
+    chats = [c["id"] for c in memory.list_chats() if c["project_key"] == key]
     try:
         memory.delete_project(key, delete_chats)
     except KeyError as exc:
         raise _not_found(exc)
+    if delete_chats:
+        for chat_id in chats:
+            semantic.forget_chat(chat_id)
     return {"deleted": key}
 
 
@@ -464,6 +548,7 @@ def get_constitution():
         "rules": constitution.rules_view(),
         "settings": constitution.load_settings(),
         "overrides": constitution.overrides.active(),
+        "lifted_seconds": constitution.overrides.lifted_seconds(),
         "max_override_minutes": constitution.MAX_OVERRIDE_MINUTES,
         "confirm_phrase": constitution.CONFIRM_PHRASE,
     }
@@ -484,6 +569,20 @@ def grant_override(body: OverrideGrant):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"overrides": constitution.overrides.active()}
+
+
+class LiftAll(BaseModel):
+    minutes: float
+
+
+@app.post("/api/constitution/lift-all")
+def lift_all(body: LiftAll):
+    """Lift the WHOLE constitution (every rule, core ones too) for 1-60 minutes. The user's call; logged."""
+    try:
+        constitution.overrides.grant_all(body.minutes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"lifted_seconds": constitution.overrides.lifted_seconds()}
 
 
 @app.delete("/api/constitution/overrides")
@@ -523,6 +622,51 @@ async def _read_upload(request: Request) -> bytes:
     if len(data) > tools.MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"File too large (limit {tools.MAX_UPLOAD_BYTES // 2**20} MB).")
     return data
+
+
+class LibraryIndex(BaseModel):
+    path: str
+
+
+class LibrarySearch(BaseModel):
+    query: str
+    path: str = ""
+
+
+@app.get("/api/library")
+def library():
+    """The document library (vector database): indexed files and passage count."""
+    st = semantic.store()
+    return {"files": st.files(), "passages": st.count("docs"), "chats_remembered": st.count("chats"),
+            "model": config.EMBED_MODEL}
+
+
+@app.post("/api/library/index")
+def library_index(body: LibraryIndex):
+    try:
+        return {"result": semantic.index_path(body.path)}
+    except semantic.EmbedError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/api/library/search")
+def library_search(body: LibrarySearch):
+    if not body.query.strip():
+        raise HTTPException(400, "Type what you are looking for.")
+    try:
+        return {"result": semantic.search_documents(body.query, body.path)}
+    except semantic.EmbedError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.delete("/api/library")
+def library_forget(path: str):
+    """Remove one file, or every file under a folder, from the library (the files themselves are untouched)."""
+    target = str(tools._resolve(path).resolve()).lower()
+    gone = [f["path"] for f in semantic.store().files() if f["path"].lower().startswith(target)]
+    for p in gone:
+        semantic.store().forget_file(p)
+    return {"removed": len(gone)}
 
 
 @app.post("/api/docs/extract")
@@ -600,10 +744,17 @@ def status():
         "ram_free_mb": round(vm.available / 2**20),
         "threads": config.NUM_THREAD,
         "models": roster,
-        "default_workspace": str(config.DEFAULT_WORKSPACE),
+        "outputs_dir": str(config.OUTPUTS_DIR),
+        "constitution_lifted_seconds": constitution.overrides.lifted_seconds(),
         "project_dir": str(config.BASE_DIR),
         "busy": GEN_LOCK.locked(),
     }
+
+
+@app.get("/api/system/live")
+def system_live():
+    """CPU load, RAM use, model RAM and CPU temperature for the sidebar meters (polled every 2 s)."""
+    return sysmon.snapshot()
 
 
 # --- UI --------------------------------------------------------------------------------------------

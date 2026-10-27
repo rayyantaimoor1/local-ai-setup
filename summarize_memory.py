@@ -10,6 +10,7 @@ must already be running.
 import sys
 
 import config
+import constitution
 import ollama_client
 from graph_memory import MemoryManager
 from ollama_client import OllamaError
@@ -24,6 +25,15 @@ Keep concrete facts: names, goals, technologies, decisions, open problems. No pr
 Summary:"""
 
 
+def build_notes(items: list) -> str:
+    """The text to summarize: most recently updated first (gather_for_summary's order), cut at the END
+    so the oldest material is what falls off, with anything secret-looking blanked out."""
+    notes = "\n\n".join(text for _, text in items)
+    if constitution.enforced("secret_files"):
+        notes = constitution.redact(notes)
+    return notes[:MAX_INPUT_CHARS]
+
+
 def main() -> int:
     memory = MemoryManager(config.DB_PATH)
     items = memory.gather_for_summary()
@@ -34,9 +44,7 @@ def main() -> int:
     if not ollama_client.ensure_running():
         print("Ollama is not running and could not be started.", file=sys.stderr)
         return 1
-    notes = "\n\n".join(text for _, text in items)
-    if len(notes) > MAX_INPUT_CHARS:
-        notes = notes[-MAX_INPUT_CHARS:]  # keep the most recent material
+    notes = build_notes(items)
     try:
         summary = ollama_client.generate(
             config.SUMMARIZER_MODEL, PROMPT.format(notes=notes), num_ctx=config.DEFAULT_NUM_CTX)

@@ -19,6 +19,8 @@ from urllib.parse import urljoin, urlparse
 
 import config
 import constitution
+import documents
+import semantic
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
@@ -107,6 +109,10 @@ def extract_pdf_text(path: str, max_pages: int = 50) -> str:
     p = _resolve(path)
     if not p.is_file():
         return f"Error: file not found: {p}"
+    if p.suffix.lower() != ".pdf":
+        return read_any(p)
+    if _is_sensitive(p):
+        return f"Error: refusing to read {p.name}: it may contain secrets."  # the wrong reader for this file type: read it properly instead of failing
     text, _ = pdf_text_from_bytes(p.read_bytes(), max_pages=int(max_pages))
     return text or NO_TEXT_PDF
 
@@ -116,6 +122,10 @@ def read_docx_text(path: str) -> str:
     p = _resolve(path)
     if not p.is_file():
         return f"Error: file not found: {p}"
+    if p.suffix.lower() != ".docx":
+        return read_any(p)
+    if _is_sensitive(p):
+        return f"Error: refusing to read {p.name}: it may contain secrets."
     return docx_text_from_bytes(p.read_bytes()) or "(this Word file has no text)"
 
 
@@ -134,6 +144,8 @@ def pdf_to_docx(pdf_path: str, docx_path: str) -> str:
 
 def _refuse_secret(what: str, text: str) -> None:
     """Article 1.3: nothing that looks like a secret may leave this computer in a search or URL."""
+    if not constitution.enforced("secrets_outbound"):
+        return
     kinds = constitution.find_secrets(text)
     if kinds:
         constitution.audit("outbound_blocked", what=what, kind=kinds[0])
@@ -168,8 +180,8 @@ def web_search(query: str, max_results: int = 5) -> str:
 class _TextExtractor(HTMLParser):
     """Visible text of an HTML page; skips scripts, styles and page chrome."""
 
-    SKIP = {"script", "style", "noscript", "svg", "head", "nav", "footer", "form", "iframe"}
-    BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "section", "article"}
+    SKIP = frozenset({"script", "style", "noscript", "svg", "head", "nav", "footer", "form", "iframe"})
+    BLOCK = frozenset({"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "section", "article"})
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -362,9 +374,11 @@ def git_add(repo_path: str = ".", paths=".") -> str:
     candidates = [m.group(1) for line in out.splitlines()
                   if (m := re.match(r"^(?:add|remove) '(.+)'$", line.strip()))]
     repo = _resolve(repo_path or ".")
-    sensitive = [c for c in candidates if constitution.is_sensitive_path(c)]
+    check_files = constitution.enforced("sensitive_files_in_push")
+    check_secrets = constitution.enforced("secrets_in_push")
+    sensitive = [c for c in candidates if check_files and constitution.is_sensitive_path(c)]
     leaks = []
-    for c in candidates[:300]:
+    for c in candidates[:300] if check_secrets else []:
         text = None if c in sensitive else _repo_text(repo / c)
         if text:
             leaks.extend(f"{c}: {kind}" for kind in constitution.find_secrets(text))
@@ -383,9 +397,11 @@ def git_commit(repo_path: str, message: str) -> str:
     if not message or not message.strip():
         return "Error: commit message is required."
     rc, names, _ = _git_run(repo_path, "diff", "--cached", "--name-only")
-    sensitive = [n for n in names.splitlines() if constitution.is_sensitive_path(n)]
+    sensitive = [n for n in names.splitlines()
+                 if constitution.enforced("sensitive_files_in_push") and constitution.is_sensitive_path(n)]
     rc, patch, _ = _git_run(repo_path, "diff", "--cached", "-U0", "--no-color")
-    leaks = [f"{f}: {kind}" for f, kind in constitution.scan_patch(patch)]
+    leaks = ([f"{f}: {kind}" for f, kind in constitution.scan_patch(patch)]
+             if constitution.enforced("secrets_in_push") else [])
     if sensitive or leaks:
         constitution.audit("commit_blocked", sensitive=sensitive, secrets=leaks)
         return ("Error: refused by the constitution (data security). The staged changes contain "
@@ -571,22 +587,6 @@ def run_pytest(path: str = ".") -> str:
     return (proc.stdout + proc.stderr).strip() or "(no output)"
 
 
-def run_python_file(path, timeout: int = config.AGENT_RUN_TIMEOUT, cwd=None, env=None) -> dict:
-    """Run a Python script; stdin is closed so input() fails fast instead of hanging."""
-    target = _resolve(path)
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(target)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, stdin=subprocess.DEVNULL, env=env,
-            cwd=str(cwd or target.parent), creationflags=CREATE_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout if isinstance(exc.stdout, str) else ""
-        return {"returncode": -1, "stdout": out, "stderr": f"Timed out after {timeout}s.", "timed_out": True}
-    return {"returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "timed_out": False}
-
-
 # --- Files ----------------------------------------------------------------
 
 IGNORED_DIRS = {
@@ -596,8 +596,18 @@ IGNORED_DIRS = {
 
 
 def _is_sensitive(p: Path) -> bool:
-    """Files that likely hold secrets: the constitution decides (Article 1.3)."""
-    return constitution.is_sensitive_path(p)
+    """Files that likely hold secrets: the constitution decides (Article 1.3), unless you lifted it."""
+    return constitution.enforced("secret_files") and constitution.is_sensitive_path(p)
+
+
+def read_any(p: Path) -> str:
+    """Small models often pick the wrong reader (read_docx_text on a .md file): use the right one."""
+    ext = p.suffix.lower()
+    if ext == ".pdf":
+        return extract_pdf_text(str(p))
+    if ext == ".docx":
+        return read_docx_text(str(p))
+    return read_file(str(p))
 
 
 def read_file(path: str, max_chars: int = 6000) -> str:
@@ -605,6 +615,8 @@ def read_file(path: str, max_chars: int = 6000) -> str:
     p = _resolve(path)
     if not p.is_file():
         return f"Error: file not found: {p}"
+    if p.suffix.lower() in (".pdf", ".docx"):
+        return read_any(p)
     if _is_sensitive(p):
         return f"Error: refusing to read {p.name}: it may contain secrets."
     with p.open("rb") as fh:
@@ -664,13 +676,6 @@ def get_system_info() -> str:
     ])
 
 
-def write_file(path: str, content: str) -> str:
-    p = _resolve(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    return f"Wrote {len(content)} chars to {p}"
-
-
 def get_directory_tree(path: str = ".", max_depth: int = 3, max_entries: int = 200) -> str:
     """List the files and folders under path (ignores .git, node_modules, venvs...)."""
     root = _resolve(path)
@@ -722,8 +727,26 @@ MODEL_TOOLS = {
     "search_files": search_files,
     "fetch_webpage": fetch_webpage,
     "get_system_info": get_system_info,
+    "create_document": documents.create_document,
+    "create_chart": documents.create_chart,
+    "git_add": git_add,
+    "git_commit": git_commit,
+    "index_documents": semantic.index_path,
+    "search_documents": semantic.search_documents,
 }
+
+
+def git_push_request(repo_path: str = ".", remote: str = "origin", branch: str = "") -> str:
+    """Ask the USER to approve pushing a branch to git. Never pushes by itself; the user decides."""
+    return "Error: a push can only be requested from the chat, where the user can approve it."
+
+
+MODEL_TOOLS["git_push_request"] = git_push_request  # the chat intercepts it and shows the push dialog
 assert "git_push" not in MODEL_TOOLS
+
+# Tools whose result is the whole answer: when they succeed the chat replies at once instead of
+# spending another model call on "I have created the file" (that is what made the agent slow).
+FINAL_TOOLS = {"create_document", "create_chart", "git_push_request"}
 
 
 def describe_tools(registry=None) -> str:
@@ -740,29 +763,42 @@ def describe_tools(registry=None) -> str:
     return "\n".join(lines)
 
 
-def parse_tool_calls(text: str, limit: int = 3) -> list:
-    """Every `TOOL_CALL: name(args)` line in model output, as [(name, args, kwargs)].
+_CALL_START = re.compile(r"TOOL_CALL:", re.IGNORECASE)
 
-    Arguments are literals only, parsed with ast, never evaluated. Lines that are
-    not a well-formed call are skipped.
+
+def _parse_call(body: str):
+    """(name, args, kwargs) if body is exactly one literal-only call, else None. Never evaluates."""
+    try:
+        node = ast.parse(body.strip(), mode="eval").body
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            return None
+        args = [ast.literal_eval(a) for a in node.args]
+        kwargs = {k.arg: ast.literal_eval(k.value) for k in node.keywords if k.arg}
+    except (SyntaxError, ValueError):
+        return None
+    return node.func.id, args, kwargs
+
+
+def parse_tool_calls(text: str, limit: int = 3) -> list:
+    """Every `TOOL_CALL: name(args)` in model output, as [(name, args, kwargs)].
+
+    A call may span several lines (document content is multi-line): the shortest text after
+    TOOL_CALL: that ends in ')' and parses as one call wins. Arguments are literals only,
+    parsed with ast, never evaluated. Anything that is not a well-formed call is skipped.
     """
     calls = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.upper().startswith("TOOL_CALL:"):
-            continue
-        body = line.split(":", 1)[1].strip()
-        try:
-            node = ast.parse(body, mode="eval").body
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-                continue
-            args = [ast.literal_eval(a) for a in node.args]
-            kwargs = {k.arg: ast.literal_eval(k.value) for k in node.keywords if k.arg}
-        except (SyntaxError, ValueError):
-            continue
-        calls.append((node.func.id, args, kwargs))
-        if len(calls) >= limit:
-            break
+    starts = [m.end() for m in _CALL_START.finditer(text)] + [len(text) + len("TOOL_CALL:")]
+    for start, next_start in zip(starts, starts[1:]):
+        segment = text[start:next_start - len("TOOL_CALL:")][:50_000]
+        found = None
+        for i, ch in enumerate(segment):
+            # the call must end its line: `__import__("os").system(...)` is not the call `__import__("os")`
+            if ch == ")" and not segment[i + 1:].split("\n", 1)[0].strip() and (found := _parse_call(segment[:i + 1])):
+                break
+        if found:
+            calls.append(found)
+            if len(calls) >= limit:
+                break
     return calls
 
 
@@ -778,15 +814,23 @@ TOOL_ALIASES = {
     "extract_pdf": ("extract_pdf_text",), "extract_text_from_pdf": ("extract_pdf_text",),
     "read_pdf_file": ("extract_pdf_text",), "pdf_text": ("extract_pdf_text",),
     "read_docx": ("read_docx_text",), "extract_docx_text": ("read_docx_text",), "read_word_file": ("read_docx_text",),
-    "read_text_file": ("read_workspace_file", "read_file"), "open_file": ("read_workspace_file", "read_file"),
-    "list_files": ("list_workspace", "get_directory_tree"), "list_directory": ("get_directory_tree", "list_workspace"),
-    "list_dir": ("get_directory_tree", "list_workspace"), "ls": ("list_workspace", "get_directory_tree"),
+    "read_text_file": ("read_file",), "open_file": ("read_file",),
+    "list_files": ("get_directory_tree",), "list_directory": ("get_directory_tree",),
+    "list_dir": ("get_directory_tree",), "ls": ("get_directory_tree",),
+    "make_docx": ("create_document",), "make_pdf": ("create_document",), "make_pptx": ("create_document",),
+    "make_xlsx": ("create_document",), "make_csv": ("create_document",), "write_document": ("create_document",),
+    "create_report": ("create_document",), "create_word_document": ("create_document",),
+    "make_chart": ("create_chart",), "plot": ("create_chart",),
+    "git_push": ("git_push_request",), "push": ("git_push_request",), "request_push": ("git_push_request",),
+    "git_stage": ("git_add",),
     "search": ("web_search",), "google": ("web_search",), "websearch": ("web_search",), "search_web": ("web_search",),
     "fetch_url": ("fetch_webpage",), "fetch_page": ("fetch_webpage",), "get_webpage": ("fetch_webpage",),
     "read_webpage": ("fetch_webpage",), "fetch_website": ("fetch_webpage",), "open_url": ("fetch_webpage",),
     "grep": ("search_files",), "find_in_files": ("search_files",), "search_in_files": ("search_files",),
     "system_info": ("get_system_info",), "get_system_information": ("get_system_info",),
-    "install_package": ("pip_install",), "pip": ("pip_install",),
+    "index_folder": ("index_documents",), "index_files": ("index_documents",), "add_to_library": ("index_documents",),
+    "semantic_search": ("search_documents",), "search_library": ("search_documents",),
+    "search_docs": ("search_documents",), "rag_search": ("search_documents",),
 }
 
 

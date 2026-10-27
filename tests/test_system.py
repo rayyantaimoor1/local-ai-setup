@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 # (conftest.py has already pointed the database, constitution settings and audit log at a temp folder)
 
-import agent_engine  # noqa: E402
 import config  # noqa: E402
 import ollama_client  # noqa: E402
 import router_engine  # noqa: E402
@@ -37,7 +36,8 @@ class FakeOllama:
 def fake(monkeypatch):
     f = FakeOllama()
 
-    def stream(model, prompt, system=None, num_ctx=0, timeout=0, temperature=None, cancel=None, keep_alive=None):
+    def stream(model, prompt, system=None, num_ctx=0, timeout=0, temperature=None, cancel=None, keep_alive=None,
+               think=None):
         f.keep_alives.append(keep_alive)
         text = f.text(model, prompt, system)
         for i in range(0, len(text), 7):
@@ -83,15 +83,22 @@ def test_parse_category():
 
 
 def test_routes_to_specialist_and_streams(fake):
-    fake.handler = lambda m, p, s: "MATH_TASK" if m == config.ROUTER_MODEL else "The answer is 42."
-    events = run_chat("what is 6 times 7")
+    fake.handler = lambda m, p, s: "WRITING_TASK" if m == config.ROUTER_MODEL else "The answer is 42."
+    events = run_chat("write me a haiku")
     kinds = [e["type"] for e in events]
     assert kinds[0] == "phase" and events[0]["phase"] == "classifying"
     assert "".join(e["text"] for e in events if e["type"] == "token") == "The answer is 42."
     done = events[-1]
-    assert done["type"] == "done" and done["meta"]["category"] == "MATH_TASK"
-    assert done["meta"]["model"] == config.SPECIALISTS["MATH_TASK"]
-    assert fake.calls == [config.ROUTER_MODEL, config.SPECIALISTS["MATH_TASK"]]
+    assert done["type"] == "done" and done["meta"]["category"] == "WRITING_TASK"
+    assert done["meta"]["model"] == config.SPECIALISTS["WRITING_TASK"]
+    assert fake.calls == [config.ROUTER_MODEL, config.SPECIALISTS["WRITING_TASK"]]
+
+
+def test_math_uses_qwen3_in_both_modes(fake):
+    fake.handler = lambda m, p, s: "MATH_TASK" if m == config.ROUTER_MODEL else ("NO ISSUES" if "strict reviewer" in p else "42")
+    assert run_chat("what is 6 times 7")[-1]["meta"]["model"] == "qwen3:8b"
+    deep = list(router_engine.process_request("what is 6 times 7", "", False, think=True))[-1]
+    assert deep["meta"]["model"] == "qwen3:8b" and deep["reply"] == "42"
 
 
 def test_garbage_router_output_falls_back_to_general(fake):
@@ -155,7 +162,9 @@ def test_git_push_is_gated_and_not_model_callable():
     assert "git_push" not in tools.MODEL_TOOLS
     with pytest.raises(PermissionError):
         tools.git_push(".")
-    assert "Error: unknown tool" in tools.call_tool("git_push", [], {"confirmed": True})
+    # a model typing "git_push" only reaches the ask-the-user stub, which never pushes on its own
+    assert tools.call_tool("git_push", [], {"confirmed": True}).startswith("Error")
+    assert tools.call_tool("git_push", [], {}).startswith("Error: a push can only be requested from the chat")
 
 
 def test_call_tool_never_raises():
@@ -175,15 +184,6 @@ def test_directory_tree_ignores_junk(tmp_path):
 
 def test_git_status_honest_outside_repo(tmp_path):
     assert "not a git repository" in tools.git_status(str(tmp_path)).lower()
-
-
-def test_run_python_file(tmp_path):
-    (tmp_path / "ok.py").write_text("print('hi')")
-    (tmp_path / "bad.py").write_text("raise SystemExit(3)")
-    (tmp_path / "ask.py").write_text("input('x')")
-    assert tools.run_python_file(tmp_path / "ok.py")["stdout"].strip() == "hi"
-    assert tools.run_python_file(tmp_path / "bad.py")["returncode"] == 3
-    assert tools.run_python_file(tmp_path / "ask.py")["returncode"] != 0  # stdin closed, no hang
 
 
 # --- memory ---------------------------------------------------------------------------------------
@@ -271,400 +271,11 @@ def test_gather_for_summary_empty_and_filled(mem):
     assert len(mem.gather_for_summary()) == 1
 
 
-# --- agent: workspace confinement -----------------------------------------------------------------
-
-@pytest.mark.parametrize("bad", [
-    "../evil.py", "..\\evil.py", "..\\..\\Windows\\System32\\evil.py", "/etc/passwd",
-    "C:\\Windows\\evil.py", "a/../../evil.py", "", ".",
-])
-def test_workspace_rejects_escapes(tmp_path, bad):
-    with pytest.raises(ValueError):
-        agent_engine._resolve_in_workspace(tmp_path, bad)
-
-
-def test_workspace_accepts_nested(tmp_path):
-    p = agent_engine._resolve_in_workspace(tmp_path, "pkg\\mod/x.py")
-    assert p.is_relative_to(tmp_path.resolve())
-
-
-def test_parse_files():
-    text = "Here:\nFILE: a.py\n```python\nprint(1)\n```\nFILE: `pkg/b.py`\n```py\nx=2\n```"
-    assert agent_engine.parse_files(text) == [("a.py", "print(1)\n"), ("pkg/b.py", "x=2\n")]
-    assert agent_engine.parse_files("```python\nprint(5)\n```") == [("main.py", "print(5)\n")]
-    assert agent_engine.parse_files("nothing") == []
-
-
-# --- agent: loop ---------------------------------------------------------------------------------------
-
-GOOD = "FILE: fib.py\n```python\nprint([1, 1, 2, 3, 5])\n```"
-BAD = "FILE: fib.py\n```python\nraise ValueError('boom')\n```"
-
-
-def agent(goal="make fib", ws=None, **kw):
-    events = list(agent_engine.run_agent(goal, ws, **kw))
-    return events, next(e for e in events if e["type"] == "done")["result"]
-
-
-def test_agent_succeeds_first_try(fake, tmp_path):
-    fake.handler = lambda m, p, s: GOOD
-    events, result = agent(ws=tmp_path)
-    assert result["success"] and len(result["iterations"]) == 1 and not result["escalated"]
-    assert (tmp_path / "fib.py").exists()
-    assert fake.calls == [config.SPECIALISTS["CODE_TASK"]]
-
-
-def test_agent_fixes_after_error_and_sees_it(fake, tmp_path):
-    seen = []
-
-    def handler(m, p, s):
-        seen.append(p)
-        return BAD if len(seen) == 1 else GOOD
-    fake.handler = handler
-    _, result = agent(ws=tmp_path)
-    assert result["success"] and len(result["iterations"]) == 2
-    assert "ValueError" in seen[1]  # the error was fed back
-
-
-def test_agent_escalates_after_three_failures(fake, tmp_path):
-    fake.handler = lambda m, p, s: GOOD if m == config.ESCALATION_MODEL else BAD
-    events, result = agent(ws=tmp_path)
-    assert result["success"] and result["escalated"]
-    assert fake.calls == [config.SPECIALISTS["CODE_TASK"]] * 3 + [config.ESCALATION_MODEL]
-    assert any(e["type"] == "escalated" for e in events)
-
-
-def test_agent_gives_up_clearly_when_escalation_also_fails(fake, tmp_path):
-    fake.handler = lambda m, p, s: BAD
-    _, result = agent(ws=tmp_path)
-    assert not result["success"] and result["escalated"]
-    assert len(result["iterations"]) == config.ESCALATE_AFTER_FAILURES + config.ESCALATION_MAX_ITERATIONS
-    assert "could not solve" in result["message"].lower()
-
-
-def test_agent_reports_when_14b_not_pulled(fake, tmp_path):
-    fake.pulled.remove(config.ESCALATION_MODEL)
-    fake.handler = lambda m, p, s: BAD
-    _, result = agent(ws=tmp_path)
-    assert not result["success"] and not result["escalated"]
-    assert "ollama pull" in result["message"]
-
-
-def test_agent_escalation_can_be_disabled(fake, tmp_path):
-    fake.handler = lambda m, p, s: BAD
-    _, result = agent(ws=tmp_path, allow_escalation=False)
-    assert not result["success"] and len(result["iterations"]) == 3 and "turned off" in result["message"]
-
-
-def test_agent_blocks_path_traversal_from_model(fake, tmp_path):
-    ws = tmp_path / "ws"
-    evil = "FILE: ..\\..\\evil.py\n```python\nprint('x')\n```\nFILE: ok.py\n```python\nprint('fine')\n```"
-    fake.handler = lambda m, p, s: evil
-    events, result = agent(ws=ws)
-    assert not (tmp_path / "evil.py").exists() and (ws / "ok.py").exists()
-    assert any(e["type"] == "files" and e["rejected"] for e in events)
-
-
-def test_agent_no_files_counts_as_failure(fake, tmp_path):
-    fake.handler = lambda m, p, s: "I would write a program but here is only prose."
-    _, result = agent(ws=tmp_path, allow_escalation=False)
-    assert not result["success"] and "no TOOL_CALL" in result["iterations"][0]["output"]
-
-
-# --- agent: tools, answers, documents, safety -------------------------------------------------------------
-
-def test_agent_researches_then_writes(fake, tmp_path):
-    (tmp_path / "notes.txt").write_text("The secret number is 4471.")
-    seen = []
-
-    def handler(m, p, s):
-        seen.append(p)
-        if len(seen) == 1:
-            return 'TOOL_CALL: read_workspace_file(path="notes.txt")'
-        return "FILE: show.py\n```python\nprint('number 4471')\n```"
-    fake.handler = handler
-    events, result = agent("print the secret number from notes.txt", tmp_path)
-    assert result["success"] and [i["kind"] for i in result["iterations"]] == ["tools", "run"]
-    tool_event = next(e for e in events if e["type"] == "tool")
-    assert tool_event["name"] == "read_workspace_file" and "4471" in tool_event["result"]
-    assert "The secret number is 4471." in seen[1]  # the tool result reached the next prompt
-
-
-def test_agent_can_just_answer(fake, tmp_path):
-    fake.handler = lambda m, p, s: "DONE: The total is 42."
-    events, result = agent("what is the total?", tmp_path)
-    assert result["success"] and result["answer"] == "The total is 42." and len(result["iterations"]) == 1
-    assert not any(e["type"] == "run" for e in events)
-
-
-def test_done_answer_with_example_code_is_not_executed(fake, tmp_path):
-    fake.handler = lambda m, p, s: "DONE: Use this:\n```python\nimport os\nos.remove('x')\n```"
-    events, result = agent("how do I delete a file?", tmp_path)
-    assert result["success"] and not any(e["type"] in ("run", "files") for e in events)
-
-
-def test_tool_and_file_in_one_reply_ignores_the_file(fake, tmp_path):
-    calls = []
-
-    def handler(m, p, s):
-        calls.append(p)
-        return ('TOOL_CALL: list_workspace()\nFILE: a.py\n```python\nprint(1)\n```' if len(calls) == 1
-                else "DONE: ok")
-    fake.handler = handler
-    events, result = agent("x", tmp_path)
-    assert not (tmp_path / "a.py").exists() and "ignored" in calls[1]
-
-
-def test_agent_enforces_requested_output_files(fake, tmp_path):
-    lazy = "FILE: make.py\n```python\nprint('report created')\n```"
-    real = ("FILE: make.py\n```python\nfrom officekit import make_docx\n"
-            "make_docx('cats.docx', 'Cats', [('Intro', 'Cats are great.')])\nprint('ok')\n```")
-    replies = iter([lazy, real])
-    fake.handler = lambda m, p, s: next(replies)
-    events, result = agent("Create a Word report about cats", tmp_path)
-    assert result["success"] and len(result["iterations"]) == 2
-    assert "none was created" in result["iterations"][0]["output"]
-    assert result["outputs"] == ["cats.docx"] and (tmp_path / "cats.docx").stat().st_size > 5000
-    assert "Cats are great." in tools.read_docx_text(str(tmp_path / "cats.docx"))
-
-
-def test_done_without_the_requested_file_is_a_failure(fake, tmp_path):
-    fake.handler = lambda m, p, s: "DONE: I made the spreadsheet."
-    _, result = agent("Make an Excel spreadsheet of squares", tmp_path, allow_escalation=False)
-    assert not result["success"] and ".xlsx" in result["iterations"][0]["output"]
-
-
-def test_a_silent_run_is_not_a_success(fake, tmp_path):
-    """Real failure: the agent ran a comment-only file first, got exit 0 and called it done."""
-    replies = iter(["FILE: notes.py\n```python\n# just some notes\n```\nFILE: real.py\n```python\nprint('did the work')\n```",
-                    "FILE: real.py\n```python\nprint('did the work')\n```"])
-    fake.handler = lambda m, p, s: next(replies)
-    events, result = agent("do the work", tmp_path)
-    assert not result["iterations"][0]["returncode"]  # it did exit 0...
-    assert "printed nothing and created no files" in result["iterations"][0]["output"]
-    assert result["success"] and len(result["iterations"]) == 2 and "did the work" in result["output"]
-
-
-def test_programs_that_call_tools_as_functions_are_not_run(fake, tmp_path):
-    """Real failure: the model wrote a program calling git_add/git_commit as Python functions."""
-    bad = ("FILE: go.py\n```python\nfrom officekit import git_add, git_commit\n"
-           "git_add('.', 'a.py')\ngit_commit('.', 'msg')\nprint('done')\n```")
-    good = "FILE: go.py\n```python\nprint('fine')\n```"
-    replies = iter([bad, good])
-    fake.handler = lambda m, p, s: next(replies)
-    events, result = agent("commit a.py", tmp_path)
-    assert sum(e["type"] == "run" for e in events) == 1  # the bad program never ran
-    first = result["iterations"][0]["output"]
-    assert "git_add" in first and "git_commit" in first and "TOOL_CALL" in first and result["success"]
-
-
-@pytest.mark.parametrize("code,expected", [
-    ("git_add('.', 'a')", ["git_add"]),
-    ("from officekit import git_commit\ngit_commit('.', 'm')", ["git_commit"]),
-    ("x = extract_pdf_text('a.pdf')\nprint(web_search('q'))", ["extract_pdf_text", "web_search"]),
-    ("def read_file(p):\n    return open(p).read()\nprint(read_file('a'))", []),   # its own function: fine
-    ("from mylib import read_file\nread_file('a')", []),
-    ("from officekit import make_docx\nmake_docx('a.docx', 'T')", []),
-    ("import os\nprint(os.listdir('.'))", []),
-    ("def broken(:", []),
-])
-def test_tools_misused_as_functions(code, expected, tmp_path):
-    box = agent_engine.build_toolbox(tmp_path.resolve())
-    assert agent_engine.tools_misused_as_functions(code, box) == expected
-
-
-def test_agent_stops_at_the_step_limit(fake, tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "AGENT_MAX_STEPS", 3)
-    fake.handler = lambda m, p, s: "TOOL_CALL: list_workspace()"
-    _, result = agent("loop forever", tmp_path)
-    assert not result["success"] and len(result["iterations"]) == 3 and "Stopped after 3 steps" in result["message"]
-
-
-@pytest.mark.parametrize("code,expected", [
-    ("import subprocess\nsubprocess.run(['dir'])", "runs other programs"),
-    ("import os\nos.system('dir')", "runs shell commands"),
-    ("import os\nos.remove('a.txt')", "deletes files"),
-    ("import shutil\nshutil.rmtree('x')", "deletes folders"),
-    ("from pathlib import Path\nPath('a').unlink()", "deletes files"),
-    ("import shutil\nshutil.move('a', 'b')", "moves or renames"),
-    ("import requests\nrequests.get('https://x.com')", "uses the network"),
-    ("from urllib import request\nrequest.urlopen('https://x.com')", "uses the network"),
-    ("import socket", "uses the network"),
-    ("eval('1+1')", "dynamically built code"),
-    ("open(r'C:\\Windows\\win.ini').read()", "outside the workspace"),
-    ("open('../secret.txt').read()", "outside the workspace"),
-    ("open('~/x').read()", "outside the workspace"),
-    ("import os\nos.path.expanduser('~')", "home folder"),
-])
-def test_scan_code_flags_risky_operations(code, expected):
-    assert any(expected in reason for reason in agent_engine.scan_code(code)), agent_engine.scan_code(code)
-
-
-def test_paths_the_user_named_in_the_goal_are_allowed():
-    goal = r"Create a Word report summarizing the PDF at C:\Users\me\Docs\invoice.pdf."
-    allowed = agent_engine.paths_in(goal)
-    assert allowed == ["c:/users/me/docs/invoice.pdf"]
-    mine = "import pymupdf\npymupdf.open(r'C:\\Users\\me\\Docs\\invoice.pdf')"
-    other = "open(r'C:\\Users\\me\\.ssh\\id_rsa')"
-    assert agent_engine.scan_code(mine) and not agent_engine.scan_code(mine, allowed)
-    assert agent_engine.scan_code(other, allowed)  # a different file is still flagged
-    assert agent_engine.scan_code("open('../x')", allowed)
-
-
-def test_scan_code_lets_normal_programs_through():
-    normal = ("import json, csv, math, datetime\nimport urllib.parse\nfrom officekit import make_docx\n"
-              "rows = [[1, 2], [3, 4]]\nmake_docx('out/report.docx', 'T', [('A', 'b')])\n"
-              "print(json.dumps(rows), urllib.parse.quote('a b'), 'a/b'.replace('/', '-'))\n"
-              "import ast\nprint(ast.literal_eval('[1]'))\n")
-    assert agent_engine.scan_code(normal) == []
-    assert agent_engine.scan_code("def broken(:\n") == []  # syntax errors fail by themselves when run
-
-
-RISKY = "FILE: go.py\n```python\nimport subprocess\nsubprocess.run(['cmd', '/c', 'echo hi'])\nprint('ran')\n```"
-
-
-def test_risky_code_waits_for_approval_and_runs_when_approved(fake, tmp_path, monkeypatch):
-    fake.handler = lambda m, p, s: RISKY
-    asked = []
-    monkeypatch.setattr(agent_engine.approvals, "wait", lambda aid, cancel=None, timeout=0: asked.append(aid) or True)
-    events, result = agent("echo something", tmp_path)
-    approval = next(e for e in events if e["type"] == "approval")
-    assert "runs other programs" in approval["findings"] and approval["file"] == "go.py"
-    assert next(e for e in events if e["type"] == "approval_result")["approved"] is True
-    assert result["success"] and asked
-
-
-def test_declined_code_is_not_run_and_two_declines_stop_the_agent(fake, tmp_path, monkeypatch):
-    fake.handler = lambda m, p, s: RISKY
-    monkeypatch.setattr(agent_engine.approvals, "wait", lambda aid, cancel=None, timeout=0: False)
-    events, result = agent("echo something", tmp_path)
-    assert not any(e["type"] == "run" for e in events)
-    assert not result["success"] and "declined" in result["message"] and len(result["iterations"]) == 2
-
-
-def test_auto_approve_skips_the_question(fake, tmp_path):
-    fake.handler = lambda m, p, s: RISKY
-    events, result = agent("echo something", tmp_path, auto_approve=True)
-    assert not any(e["type"] == "approval" for e in events) and result["success"]
-
-
-def test_approval_broker():
-    aid = agent_engine.approvals.create()
-    assert agent_engine.approvals.decide(aid, True) is True
-    assert agent_engine.approvals.wait(aid, timeout=2) is True
-    assert agent_engine.approvals.decide(aid, True) is False  # consumed
-    aid2 = agent_engine.approvals.create()
-    assert agent_engine.approvals.wait(aid2, timeout=0.6) is False  # nobody answered
-    import threading
-    aid3 = agent_engine.approvals.create()
-    cancel = threading.Event()
-    cancel.set()
-    assert agent_engine.approvals.wait(aid3, cancel, timeout=5) is False  # tab closed
-
-
-def test_agent_toolbox(tmp_path, monkeypatch):
-    box = agent_engine.build_toolbox(tmp_path.resolve())
-    (tmp_path / "a.txt").write_text("hello")
-    assert "a.txt" in box["list_workspace"]() and box["read_workspace_file"]("a.txt") == "hello"
-    assert box["read_workspace_file"]("..\\..\\x.txt").startswith("Error:")
-    refused = box["pip_install"]("totally-unknown-pkg")
-    assert refused.startswith("Error:") and "not on the allowed list" in refused and "pandas" in refused
-    assert "git_push" not in box and "write_file" not in box
-
-    class Done:
-        returncode, stdout, stderr = 0, "", ""
-    monkeypatch.setattr(agent_engine.subprocess, "run", lambda *a, **k: Done())
-    assert box["pip_install"]("python-docx==1.1") == "Installed python-docx."
-
-
 def test_parse_tool_calls_handles_several_and_junk():
     text = 'TOOL_CALL: list_workspace()\nnoise\nTOOL_CALL: read_file(path="a.py")\nTOOL_CALL: broken(\nTOOL_CALL: __import__("os")'
     names = [c[0] for c in tools.parse_tool_calls(text)]
     assert names == ["list_workspace", "read_file", "__import__"]  # unknown names are refused later, at call time
     assert tools.call_tool("__import__", ["os"], registry={"list_workspace": lambda: ""}).startswith("Error: unknown tool")
-
-
-@pytest.mark.parametrize("goal,exts", [
-    ("Create a Word report about cats", [".docx"]),
-    ("Make an Excel spreadsheet and a chart of sales", [".xlsx", ".png"]),
-    ("Build a PowerPoint presentation on Python", [".pptx"]),
-    ("Generate a PDF of the results", [".pdf"]),
-    ("Export the data as csv", [".csv"]),
-    ("Extract the text from invoice.pdf", []),
-    ("Summarize the report in one word", []),
-    # the real failure: a PDF that is the INPUT must not be demanded as output
-    (r"Create a Word report summarizing the PDF at C:\x\invoice.pdf. Include the total.", [".docx"]),
-    ("Create a one page PDF summary of cats", [".pdf"]),
-    ("Create a Word report describing the chart in sales.png", [".docx"]),
-    ("Summarize the Excel spreadsheet at data.xlsx into a Word report", [".docx"]),
-    ("Search my project for TODO comments and put them in a Word table", [".docx"]),
-    ("Create an Excel spreadsheet of squares and make a bar chart image of them", [".xlsx", ".png"]),
-    ("Make an Excel sheet of the first 20 square numbers with a bar chart", [".xlsx", ".png"]),
-    ("Read the PowerPoint presentation deck.pptx and list its titles", []),
-    ("Fetch https://example.com and write a one-page PDF summary", [".pdf"]),
-])
-def test_expected_outputs(goal, exts):
-    assert agent_engine.expected_outputs(goal) == exts
-
-
-@pytest.mark.parametrize("typed,real", [
-    ("read_pdf_text", "extract_pdf_text"), ("read_pdf", "extract_pdf_text"), ("fetch_url", "fetch_webpage"),
-    ("search", "web_search"), ("grep", "search_files"), ("extract_pdf_txt", "extract_pdf_text"),  # typo -> fuzzy
-    ("get_system_inf", "get_system_info"), ("list_files", "list_workspace"),
-])
-def test_made_up_tool_names_are_forgiven(typed, real, tmp_path):
-    registry = agent_engine.build_toolbox(tmp_path.resolve())
-    assert tools.resolve_tool_name(typed, registry) == real
-
-
-def test_unknown_tool_names_are_still_refused(tmp_path):
-    registry = agent_engine.build_toolbox(tmp_path.resolve())
-    for name in ("git_push", "rm_rf", "make_docx", "__import__", "write_file"):
-        assert tools.resolve_tool_name(name, registry) == ""
-
-
-def test_alias_reaches_the_real_tool(tmp_path):
-    (tmp_path / "a.txt").write_text("hi")
-    registry = agent_engine.build_toolbox(tmp_path.resolve())
-    assert "a.txt" in tools.call_tool("list_files", [], {}, registry=registry)
-
-
-def test_officekit_called_as_a_tool_gets_a_helpful_correction(fake, tmp_path):
-    replies = iter(['TOOL_CALL: make_docx("r.docx", "T", [])',
-                    "FILE: m.py\n```python\nfrom officekit import make_docx\nmake_docx('r.docx', 'T', [('A', 'b')])\n```"])
-    fake.handler = lambda m, p, s: next(replies)
-    events, result = agent("Create a Word report", tmp_path)
-    tool_event = next(e for e in events if e["type"] == "tool")
-    assert "not a tool" in tool_event["result"] and "from officekit import make_docx" in tool_event["result"]
-    assert result["success"] and result["outputs"] == ["r.docx"]
-
-
-def test_agent_keeps_the_model_loaded_and_unloads_it_at_the_end(fake, tmp_path):
-    replies = iter(["TOOL_CALL: list_workspace()", GOOD])
-    fake.handler = lambda m, p, s: next(replies)
-    _, result = agent("make fib", tmp_path)
-    assert result["success"]
-    assert set(fake.keep_alives) == {config.AGENT_KEEP_ALIVE}  # steps reuse the loaded model
-    assert fake.unloaded == [config.SPECIALISTS["CODE_TASK"]]  # and RAM is returned afterwards
-
-
-def test_escalation_unloads_the_small_model_before_the_big_one(fake, tmp_path, monkeypatch):
-    order = []
-    fake.handler = lambda m, p, s: (order.append(("gen", m)) or (GOOD if m == config.ESCALATION_MODEL else BAD))
-    monkeypatch.setattr(ollama_client, "unload", lambda model: order.append(("unload", model)))
-    agent("make fib", tmp_path)
-    first_14b = order.index(("gen", config.ESCALATION_MODEL))
-    assert ("unload", config.SPECIALISTS["CODE_TASK"]) in order[:first_14b]
-    assert order[-1] == ("unload", config.ESCALATION_MODEL) or ("unload", config.ESCALATION_MODEL) in order[-2:]
-
-
-def test_code_using_the_path_from_the_goal_runs_without_asking(fake, tmp_path):
-    goal = r"Create a Word report summarizing the PDF at C:\Users\me\Docs\invoice.pdf"
-    reads_it = ("FILE: m.py\n```python\nimport pymupdf\nfrom officekit import make_docx\n"
-                "make_docx('r.docx', 'T', [('A', 'x')])  # " + r"C:\Users\me\Docs\invoice.pdf" + "\n"
-                "print(r'C:\\Users\\me\\Docs\\invoice.pdf')\n```")
-    fake.handler = lambda m, p, s: reads_it
-    events, result = agent(goal, tmp_path)
-    assert not any(e["type"] == "approval" for e in events) and result["success"]
 
 
 def test_officekit_builds_every_format(tmp_path, monkeypatch):
@@ -760,14 +371,6 @@ def test_api_chats_and_projects_crud(client):
     assert client.delete(f"/api/projects/{p['id']}").status_code == 200
 
 
-def test_api_agent_stream_and_run(client, fake, tmp_path):
-    fake.handler = lambda m, p, s: GOOD
-    events = sse(client.post("/api/agent/stream", json={"goal": "fib", "workspace": str(tmp_path)}))
-    assert events[0]["type"] == "iteration" and events[-1]["type"] == "done" and events[-1]["result"]["success"]
-    r = client.post("/api/agent/run", json={"goal": "fib", "workspace": str(tmp_path)})
-    assert r.status_code == 200 and r.json()["success"] is True
-
-
 def test_api_git_push_needs_confirmation(client):
     assert client.post("/api/git/push", json={"repo_path": "."}).status_code == 403
     assert client.post("/api/git/push", json={"repo_path": ".", "confirmed": False}).status_code == 403
@@ -802,61 +405,6 @@ def test_ensure_running(monkeypatch):
     monkeypatch.setattr(ollama_client, "list_models", down)
     monkeypatch.setenv("LOCALAPPDATA", str(ROOT / "no-such-dir"))
     assert ollama_client.ensure_running(wait=1) is False  # not installed: gives up quietly
-
-
-def test_api_workspace_file_is_confined(client, fake, tmp_path):
-    fake.handler = lambda m, p, s: GOOD
-    ws = str(tmp_path / "ws")
-    assert client.get("/api/workspace/file", params={"workspace": ws, "path": "fib.py"}).status_code == 403
-    sse(client.post("/api/agent/stream", json={"goal": "fib", "workspace": ws}))  # registers the workspace
-    ok = client.get("/api/workspace/file", params={"workspace": ws, "path": "fib.py"})
-    assert ok.status_code == 200 and "print" in ok.json()["content"]
-    for bad in ("..\\..\\secret.txt", "../x", "C:\\Windows\\win.ini", "/etc/passwd"):
-        assert client.get("/api/workspace/file", params={"workspace": ws, "path": bad}).status_code == 400
-    assert client.get("/api/workspace/file", params={"workspace": ws, "path": "nope.py"}).status_code == 404
-    assert client.get("/api/workspace/file", params={"workspace": str(tmp_path), "path": "ws/fib.py"}).status_code == 403
-
-
-def test_api_agent_outputs_download_and_confinement(client, fake, tmp_path):
-    ws = str(tmp_path / "ws")
-    fake.handler = lambda m, p, s: ("FILE: m.py\n```python\nfrom officekit import make_docx\n"
-                                    "make_docx('r.docx', 'T', [('A', 'hello')])\nprint('ok')\n```")
-    goal = "Create a Word report"
-    events = sse(client.post("/api/agent/stream", json={"goal": goal, "workspace": ws}))
-    result = events[-1]["result"]
-    assert result["success"] and result["outputs"] == ["r.docx"]
-    got = client.get("/api/workspace/download", params={"workspace": ws, "path": "r.docx"})
-    assert got.status_code == 200 and got.content[:2] == b"PK" and "r.docx" in got.headers["content-disposition"]
-    assert "hello" in tools.docx_text_from_bytes(got.content)
-    assert client.get("/api/workspace/download", params={"workspace": ws, "path": "..\\x"}).status_code == 400
-    assert client.get("/api/workspace/download", params={"workspace": ws, "path": "nope.docx"}).status_code == 404
-    assert client.get("/api/workspace/download", params={"workspace": str(tmp_path), "path": "ws/r.docx"}).status_code == 403
-
-
-def test_api_agent_approval_flow(client, fake, tmp_path):
-    import threading
-    import time
-    fake.handler = lambda m, p, s: RISKY
-    assert client.post("/api/agent/approve", json={"id": "nope", "approved": True}).status_code == 404
-
-    stale = set(agent_engine.approvals._items)  # left behind by tests that fake `wait`
-
-    def approve_when_asked():
-        for _ in range(100):
-            pending = [a for a in list(agent_engine.approvals._items) if a not in stale]
-            if pending:
-                agent_engine.approvals.decide(pending[0], True)
-                return
-            time.sleep(0.1)
-    threading.Thread(target=approve_when_asked, daemon=True).start()
-    events = sse(client.post("/api/agent/stream", json={"goal": "echo", "workspace": str(tmp_path / "a")}))
-    assert any(e["type"] == "approval" for e in events) and events[-1]["result"]["success"]
-
-    # the blocking endpoint has nobody to ask, so risky code is declined, never hung
-    res = client.post("/api/agent/run", json={"goal": "echo", "workspace": str(tmp_path / "b")}).json()
-    assert not res["success"] and "declined" in res["message"]
-    ok = client.post("/api/agent/run", json={"goal": "echo", "workspace": str(tmp_path / "c"), "auto_approve": True}).json()
-    assert ok["success"]
 
 
 def test_api_web_search_and_git_helpers(client, monkeypatch, tmp_path):

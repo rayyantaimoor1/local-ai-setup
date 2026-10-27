@@ -70,7 +70,8 @@ class ThinkFilter:
         return rest
 
 
-def _payload(model, prompt, system, num_ctx, stream, temperature, num_predict, keep_alive=None) -> dict:
+def _payload(model, prompt, system, num_ctx, stream, temperature, num_predict, keep_alive=None, think=None,
+             images=None) -> dict:
     options = {
         "num_thread": config.NUM_THREAD,
         "num_gpu": config.NUM_GPU,
@@ -89,6 +90,12 @@ def _payload(model, prompt, system, num_ctx, stream, temperature, num_predict, k
     }
     if system:
         payload["system"] = system
+    if images:
+        payload["images"] = list(images)  # base64 JPEG/PNG, for vision models
+    if think is not None and model in config.THINKING_MODELS:
+        payload["think"] = bool(think)  # only reasoning models accept it; others would reject the field
+    elif model in config.THINK_OFF_MODELS:
+        payload["think"] = False  # never its slow reasoning phase
     return payload
 
 
@@ -144,13 +151,16 @@ def stream_generate(
     temperature: Optional[float] = None,
     cancel=None,
     keep_alive: Optional[str] = None,
+    think: Optional[bool] = None,
+    images: Optional[list] = None,
 ) -> Iterator[tuple]:
     """Yield ("thinking" | "response", text) pieces as Ollama produces them.
 
     `cancel` is an optional threading.Event; when set, the stream is closed.
     `keep_alive` overrides how long the model stays loaded afterwards (default: unload at once).
+    `think` switches a reasoning model's (deepseek-r1) thinking on or off; ignored for other models.
     """
-    payload = _payload(model, prompt, system, num_ctx, True, temperature, None, keep_alive)
+    payload = _payload(model, prompt, system, num_ctx, True, temperature, None, keep_alive, think, images)
     try:
         with httpx.stream(
             "POST", config.OLLAMA_GENERATE_URL, json=payload, timeout=_timeout(timeout)
@@ -174,11 +184,103 @@ def stream_generate(
                 if chunk.get("response"):
                     yield ("response", chunk["response"])
                 if chunk.get("done"):
+                    yield ("stats", {k: chunk.get(k, 0) for k in (
+                        "load_duration", "prompt_eval_count", "prompt_eval_duration", "eval_count", "eval_duration")})
                     return
     except httpx.ConnectError:
         raise _unreachable() from None
     except httpx.TimeoutException:
         raise OllamaError(f"Model '{model}' stopped responding for {timeout:.0f}s.") from None
+
+
+def stream_chat(
+    model: str,
+    messages: list,
+    num_ctx: int = config.DEFAULT_NUM_CTX,
+    timeout: float = config.SPECIALIST_TIMEOUT,
+    temperature: Optional[float] = None,
+    cancel=None,
+    keep_alive: Optional[str] = None,
+    think: Optional[bool] = None,
+) -> Iterator[tuple]:
+    """Like stream_generate, but for a list of {"role", "content"} messages (Ollama /api/chat).
+
+    Used to continue a conversation with a model that is still loaded: the earlier messages render to
+    exactly the tokens Ollama already holds in its cache, so only the new message has to be read."""
+    payload = _payload(model, "", None, num_ctx, True, temperature, None, keep_alive, think)
+    payload.pop("prompt", None)
+    payload["messages"] = messages
+    try:
+        with httpx.stream("POST", config.OLLAMA_URL + "/api/chat", json=payload, timeout=_timeout(timeout)) as resp:
+            if resp.status_code != 200:
+                resp.read()
+                _raise_for_status(resp.status_code, resp.text, model)
+            for line in resp.iter_lines():
+                if cancel is not None and cancel.is_set():
+                    return
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except ValueError:
+                    continue
+                if chunk.get("error"):
+                    raise OllamaError(str(chunk["error"]))
+                message = chunk.get("message") or {}
+                if message.get("thinking"):
+                    yield ("thinking", message["thinking"])
+                if message.get("content"):
+                    yield ("response", message["content"])
+                if chunk.get("done"):
+                    yield ("stats", {k: chunk.get(k, 0) for k in (
+                        "load_duration", "prompt_eval_count", "prompt_eval_duration", "eval_count", "eval_duration")})
+                    return
+    except httpx.ConnectError:
+        raise _unreachable() from None
+    except httpx.TimeoutException:
+        raise OllamaError(f"Model '{model}' stopped responding for {timeout:.0f}s.") from None
+
+
+def model_sizes() -> dict:
+    """{name: size in bytes} for every pulled model."""
+    try:
+        resp = httpx.get(config.OLLAMA_TAGS_URL, timeout=5.0)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        raise _unreachable() from None
+    if resp.status_code != 200:
+        raise OllamaError(f"Ollama error {resp.status_code} listing models.")
+    return {m.get("name", ""): int(m.get("size", 0)) for m in resp.json().get("models", [])}
+
+
+def loaded_models() -> list:
+    """Names of the models Ollama has in RAM right now. Best effort: [] on any problem."""
+    try:
+        resp = httpx.get(config.OLLAMA_URL.rstrip("/") + "/api/ps", timeout=5.0)
+        return [m.get("name", "") for m in resp.json().get("models", [])] if resp.status_code == 200 else []
+    except (httpx.HTTPError, ValueError):
+        return []
+
+
+def preload(model: str, num_ctx: int, keep_alive: str) -> bool:
+    """Load a model into RAM without generating anything, with the same options a real request
+    will use (a different num_ctx would make Ollama load it again). Best effort: never raises."""
+    payload = _payload(model, "", None, num_ctx, False, None, None, keep_alive)
+    try:
+        return httpx.post(config.OLLAMA_GENERATE_URL, json=payload, timeout=180.0).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def evict_except(keep: list) -> list:
+    """Unload every model in RAM that is not in `keep` (one big model at a time on 16 GB). Returns the
+    names unloaded. Best effort: never raises."""
+    wanted = {k.removesuffix(":latest") for k in keep}
+    gone = []
+    for name in loaded_models():
+        if name.removesuffix(":latest") not in wanted:
+            unload(name)
+            gone.append(name)
+    return gone
 
 
 def unload(model: str) -> None:
