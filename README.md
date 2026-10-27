@@ -52,6 +52,69 @@ Double-click `start.bat` (or the Desktop shortcut). It starts Ollama if needed a
 - Settings live in `constitution.json`; both it, the audit log and the chat database are in `.gitignore`.
 - Read-only tools can read files your user account can read, except secret-looking ones; the rules are a strong safety net, not a sandbox.
 
+## Orchestration graphs
+The chat runs on three orchestration graphs built with `orchestrator.py`, a small graph engine with the same model as LangGraph's StateGraph (named nodes over a shared state, fixed and conditional edges, cycles, live events, a recorded path) but without LangGraph's dependency tree (LangChain core and dozens of packages), which would cost start-up time and RAM on 16 GB for no speed gain. A graph is checked when it is built, so a broken edge fails at start-up, not in the middle of a chat; a cycle without an exit is stopped. Each answer records the path it took (`trace` in its meta), and `GET /api/graph` returns the graphs as data and as Mermaid.
+
+**Chat pipeline** (`router_engine.PIPELINE`):
+
+```mermaid
+flowchart TD
+    intake["Intake"]
+    vision["Read images"]
+    attachments["Pick relevant parts of attachments"]
+    route["Choose a specialist"]
+    load["Free RAM, check the model fits"]
+    prompt["Build the prompt (tools, continuation)"]
+    answer["Answer (tool loop, refine loop)"]
+    finish["Remember and reply"]
+    __end__((end))
+    intake -.-> vision
+    intake -.-> attachments
+    vision --> attachments
+    attachments --> route
+    route --> load
+    load --> prompt
+    prompt --> answer
+    answer --> finish
+    finish --> __end__
+```
+
+**Tool loop** (`router_engine.TOOL_LOOP`, inside "answer"):
+
+```mermaid
+flowchart TD
+    generate["Model writes (an answer or tool calls)"]
+    tools["Run the tools"]
+    finalize["Refine or check the answer"]
+    __end__((end))
+    generate -.-> tools
+    generate -.-> finalize
+    tools -.-> generate
+    tools -.-> __end__
+    finalize --> __end__
+```
+
+**Deep-thinking refine loop** (`router_engine.REFINE_GRAPH`, inside "finalize" when deep thinking is on):
+
+```mermaid
+flowchart TD
+    check["Automatic checks (code, HTML, JSON, arithmetic, times)"]
+    review["Model reviews against the request"]
+    decide["Anything left to fix?"]
+    revise["Model rewrites the answer"]
+    __end__((end))
+    check -.-> review
+    check -.-> decide
+    check -.-> __end__
+    review --> decide
+    decide -.-> revise
+    decide -.-> __end__
+    revise -.-> check
+    revise -.-> __end__
+```
+
+Dotted arrows are conditional edges. The coloured graph above each answer in the chat shows the stages one answer actually went through.
+
 ## Speed and RAM (measured on this laptop)
 - **Routing in milliseconds:** a rule catches unmistakable tool requests; otherwise the **embedding router** compares the message with ~110 labelled examples (`ROUTE_EXAMPLES`) using `nomic-embed-text` (0.27 GB, kept loaded); only when it is unsure does the router model decide. On 60 new held-out requests: router model alone 57/60 right at 13.4 s each; the hybrid 59/60 right, median 0.07 s (mean 2.2 s, because 1 in 6 messages still goes to the router model).
 - **Load while you type** now predicts the *specialist* with the embedding router and loads it before you press Send (only with 7 GB RAM free and nothing running), with exactly the context window the request will use (a different size makes Ollama load it again). Measured: a coding question typed into a fresh chat started writing after **5.8 s**, with no load step.

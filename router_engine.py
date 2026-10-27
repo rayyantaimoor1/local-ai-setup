@@ -38,6 +38,7 @@ import ollama_client
 import semantic
 import tools
 from ollama_client import OllamaError, ThinkFilter
+from orchestrator import END, Graph, State
 
 CLASSIFIER_PROMPT = """You are a request classifier. Reply with exactly ONE label and nothing else.
 
@@ -675,8 +676,11 @@ def process_request(message: str, context: str = "", deep: bool = False, cancel=
                     conversation_key: Optional[str] = None) -> Iterator[dict]:
     """Route one user message end to end, yielding events (see module docstring).
 
+    Runs PIPELINE, the orchestration graph below (intake -> vision -> attachments -> route -> load ->
+    prompt -> answer -> finish); the path taken is in the answer's meta as "trace".
+
     deep        use the 14B model (no router, no tools)
-    think       deep thinking: the refine loop (draft, automatic checks, review, revise; see _refine)
+    think       deep thinking: the refine loop (REFINE_GRAPH: check -> review -> revise -> check ...)
     history     the recent conversation, re-injected so the model keeps track of it
     prev_category  the previous answer's route; short follow-ups reuse it instead of calling the router
     keep_warm   keep the model loaded after the answer, so the next message starts fast
@@ -684,110 +688,152 @@ def process_request(message: str, context: str = "", deep: bool = False, cancel=
     prev_tools  the previous answer's tool list (kept in order so the loaded model's prompt cache stays valid)
     conversation_key  the chat's id: a follow-up may continue the conversation the loaded model has cached
     """
-    started = time.time()
-    steps = Steps()
+    state = State(message=message, context=context, deep=deep, cancel=cancel, think=think, history=history,
+                  prev_category=prev_category, keep_warm=keep_warm, images=images or [], prev_tools=prev_tools,
+                  conversation_key=conversation_key, started=time.time(), steps=Steps())
     try:
-        route_text = message  # routing looks at what the user typed, not at document or image contents
-        if images:
-            seen = yield from _read_images(images, message, cancel, steps)
-            if cancel is not None and cancel.is_set():
-                return
-            route_text = message.strip() or "Describe this image."
-            message = f"--- Image, as read by the vision model ---\n{seen}\n--- end of image ---\n\n{route_text}"
-        message, picked = compact_attachments(message)
-        for name, kept, total in picked:
-            yield from steps.instant(f"Picked the relevant parts of {name}", f"{kept:,} of {total:,} characters")
-        if not images:
-            route_text = _ATTACHMENT.sub(" ", message).strip() or message
-        if deep:
-            category, router_s, routed_by = "DEEP", 0.0, "deep"
-            model = config.ESCALATION_MODEL
-            yield from steps.instant("Using the 14B model", "14B switch is on: no router, no tools")
-        elif prev_category in config.SPECIALISTS and not rule_category(route_text) and is_follow_up(route_text):
-            category, router_s, routed_by = prev_category, 0.0, "follow-up"
-            model = config.SPECIALISTS[category]
-        else:
-            yield {"type": "phase", "phase": "classifying", "model": config.ROUTER_MODEL}
-            sid, event = steps.start("Choosing a specialist",
-                                     "matched a rule" if rule_category(route_text) else "comparing with examples…")
-            yield event
-            category, router_s, routed_by = classify(route_text)
-            model = config.SPECIALISTS[category]
-            yield steps.done(sid, detail=f"{category.replace('_TASK', '').lower()} (by {routed_by})")
-        if cancel is not None and cancel.is_set():
-            return
-        if not deep and not think and category in config.FAST_MODELS:
-            model = config.FAST_MODELS[category]  # fast mode: skip the slow reasoning model
-        if routed_by == "follow-up":
-            yield from steps.instant("Follow-up: same specialist as before", model)
-        yield {"type": "phase", "phase": "routed", "category": category, "model": model,
-               "router_seconds": round(router_s, 1), "routed_by": routed_by}
-
-        yield {"type": "phase", "phase": "trimming"}
-        gone = ollama_client.evict_except([model, config.EMBED_MODEL])  # the previous answer's model, if different
-        if gone:
-            yield from steps.instant("Unloaded the previous model", ", ".join(gone))
-        trim = _trim()
-        if trim.get("freed_mb"):
-            yield from steps.instant("Freed memory", f"{trim['freed_mb']} MB")
-        model, why = fit_model(model, allow_smaller=not deep)
-        if why:
-            yield from steps.instant(why, model, "warn")
-        yield {"type": "phase", "phase": "loading_model", "model": model}
-
-        design = is_design_request(route_text)
-        toolset = select_tools(message + "\n" + history[-600:]) if category in config.TOOL_CATEGORIES else None
-        if toolset and prev_tools and category == prev_category:
-            # same specialist, probably still loaded: keep the previous tool list in its order and add new
-            # tools at the end, so the cached prompt stays valid up to the new ones
-            names = [n for n in prev_tools if n in tools.MODEL_TOOLS] + [n for n in toolset if n not in prev_tools]
-            toolset = {n: tools.MODEL_TOOLS[n] for n in names}
-        use_tools = bool(toolset)
-        reflect = think and model not in config.THINKING_MODELS  # reasoning models think natively
-        system = build_system(category, toolset, think=reflect, design=design)
-        base_ctx = config.TOOL_NUM_CTX if use_tools else config.DEFAULT_NUM_CTX
-        conversation = _continuation(conversation_key, model, system, message, base_ctx,
-                                     usable=not (think or images or deep))
-        if conversation is not None:
-            prompt = f"User request:\n{message}"  # the earlier turns are real messages the model holds in cache
-            yield from steps.instant("Continuing the conversation", "the model still holds it, so it is not re-read")
-        else:
-            prompt = build_prompt(message, context, history)
-        if use_tools and _LIBRARY_RULE.search(route_text) and _library_has_documents():
-            # small models sometimes answer "according to my documents" from general knowledge instead
-            prompt += LIBRARY_HINT
-        model_started = time.time()
-        record = {}
-        reply, used, created, generations = yield from _answer(
-            model, system, prompt, message, use_tools, cancel, think, reflect, keep_warm, steps,
-            conversation=conversation, record=record)
-        if cancel is not None and cancel.is_set():
-            return
-        _remember_conversation(conversation_key, model, system, conversation, record, base_ctx,
-                               usable=not (think or images or deep))
-        if category == "MATH_TASK" and reply:
-            reply = plain_math(reply)
-
-        yield {"type": "done", "reply": reply or "(The model returned no answer.)", "meta": {
-            "category": category,
-            "model": model,
-            "router_seconds": round(router_s, 1),
-            "model_seconds": round(time.time() - model_started, 1),
-            "total_seconds": round(time.time() - started, 1),
-            "tool": ", ".join(dict.fromkeys(used)) or None,
-            "files": created,
-            "rounds": generations,
-            "thinking": "deep" if think else "fast",
-            "routed_by": routed_by,
-            "tools_offered": len(toolset) if toolset else 0,
-            "toolset": list(toolset) if toolset else [],
-            "warm": keep_warm,
-            "design": design,
-            "ram_freed_mb": trim.get("freed_mb", 0),
-            "steps": steps.summary(),
-        }}
+        yield from PIPELINE.run(state, stop=_cancelled)
     except OllamaError as exc:
         yield {"type": "error", "message": str(exc)}
+
+
+def _cancelled(s) -> bool:
+    return s.get("cancel") is not None and s.cancel.is_set()
+
+
+# --- the pipeline graph's nodes: each reads and writes the shared state ---------------------------------------
+
+def _p_intake(s):
+    s.route_text = s.message  # routing looks at what the user typed, not at document or image contents
+
+
+def _p_vision(s):
+    seen = yield from _read_images(s.images, s.message, s.cancel, s.steps)
+    s.route_text = s.message.strip() or "Describe this image."
+    s.message = f"--- Image, as read by the vision model ---\n{seen}\n--- end of image ---\n\n{s.route_text}"
+
+
+def _p_attachments(s):
+    s.message, picked = compact_attachments(s.message)
+    for name, kept, total in picked:
+        yield from s.steps.instant(f"Picked the relevant parts of {name}", f"{kept:,} of {total:,} characters")
+    if not s.images:
+        s.route_text = _ATTACHMENT.sub(" ", s.message).strip() or s.message
+
+
+def _p_route(s):
+    steps = s.steps
+    if s.deep:
+        s.category, s.router_s, s.routed_by = "DEEP", 0.0, "deep"
+        s.model = config.ESCALATION_MODEL
+        yield from steps.instant("Using the 14B model", "14B switch is on: no router, no tools")
+    elif s.prev_category in config.SPECIALISTS and not rule_category(s.route_text) and is_follow_up(s.route_text):
+        s.category, s.router_s, s.routed_by = s.prev_category, 0.0, "follow-up"
+        s.model = config.SPECIALISTS[s.category]
+    else:
+        yield {"type": "phase", "phase": "classifying", "model": config.ROUTER_MODEL}
+        sid, event = steps.start("Choosing a specialist",
+                                 "matched a rule" if rule_category(s.route_text) else "comparing with examples…")
+        yield event
+        s.category, s.router_s, s.routed_by = classify(s.route_text)
+        s.model = config.SPECIALISTS[s.category]
+        yield steps.done(sid, detail=f"{s.category.replace('_TASK', '').lower()} (by {s.routed_by})")
+    if not s.deep and not s.think and s.category in config.FAST_MODELS:
+        s.model = config.FAST_MODELS[s.category]  # fast mode: skip a slow reasoning model
+    if s.routed_by == "follow-up":
+        yield from steps.instant("Follow-up: same specialist as before", s.model)
+    yield {"type": "phase", "phase": "routed", "category": s.category, "model": s.model,
+           "router_seconds": round(s.router_s, 1), "routed_by": s.routed_by}
+
+
+def _p_load(s):
+    yield {"type": "phase", "phase": "trimming"}
+    gone = ollama_client.evict_except([s.model, config.EMBED_MODEL])  # the previous answer's model, if different
+    if gone:
+        yield from s.steps.instant("Unloaded the previous model", ", ".join(gone))
+    s.trim = _trim()
+    if s.trim.get("freed_mb"):
+        yield from s.steps.instant("Freed memory", f"{s.trim['freed_mb']} MB")
+    s.model, why = fit_model(s.model, allow_smaller=not s.deep)
+    if why:
+        yield from s.steps.instant(why, s.model, "warn")
+    yield {"type": "phase", "phase": "loading_model", "model": s.model}
+
+
+def _p_prompt(s):
+    s.design = is_design_request(s.route_text)
+    toolset = select_tools(s.message + "\n" + s.history[-600:]) if s.category in config.TOOL_CATEGORIES else None
+    if toolset and s.prev_tools and s.category == s.prev_category:
+        # same specialist, probably still loaded: keep the previous tool list in its order and add new
+        # tools at the end, so the cached prompt stays valid up to the new ones
+        names = [n for n in s.prev_tools if n in tools.MODEL_TOOLS] + [n for n in toolset if n not in s.prev_tools]
+        toolset = {n: tools.MODEL_TOOLS[n] for n in names}
+    s.toolset, s.use_tools = toolset, bool(toolset)
+    s.reflect = s.think and s.model not in config.THINKING_MODELS  # reasoning models think natively
+    s.system = build_system(s.category, toolset, think=s.reflect, design=s.design)
+    s.base_ctx = config.TOOL_NUM_CTX if s.use_tools else config.DEFAULT_NUM_CTX
+    s.continuable = not (s.think or s.images or s.deep)
+    s.conversation = _continuation(s.conversation_key, s.model, s.system, s.message, s.base_ctx, s.continuable)
+    if s.conversation is not None:
+        s.prompt = f"User request:\n{s.message}"  # the earlier turns are real messages the model holds in cache
+        yield from s.steps.instant("Continuing the conversation", "the model still holds it, so it is not re-read")
+    else:
+        s.prompt = build_prompt(s.message, s.context, s.history)
+    if s.use_tools and _LIBRARY_RULE.search(s.route_text) and _library_has_documents():
+        # small models sometimes answer "according to my documents" from general knowledge instead
+        s.prompt += LIBRARY_HINT
+
+
+def _p_answer(s):
+    s.model_started, s.record = time.time(), {}
+    s.reply, s.used, s.created, s.generations = yield from _answer(
+        s.model, s.system, s.prompt, s.message, s.use_tools, s.cancel, s.think, s.reflect, s.keep_warm, s.steps,
+        conversation=s.conversation, record=s.record)
+
+
+def _p_finish(s):
+    _remember_conversation(s.conversation_key, s.model, s.system, s.conversation, s.record, s.base_ctx, s.continuable)
+    reply = plain_math(s.reply) if s.category == "MATH_TASK" and s.reply else s.reply
+    yield {"type": "done", "reply": reply or "(The model returned no answer.)", "meta": {
+        "category": s.category,
+        "model": s.model,
+        "router_seconds": round(s.router_s, 1),
+        "model_seconds": round(time.time() - s.model_started, 1),
+        "total_seconds": round(time.time() - s.started, 1),
+        "tool": ", ".join(dict.fromkeys(s.used)) or None,
+        "files": s.created,
+        "rounds": s.generations,
+        "thinking": "deep" if s.think else "fast",
+        "routed_by": s.routed_by,
+        "tools_offered": len(s.toolset) if s.toolset else 0,
+        "toolset": list(s.toolset) if s.toolset else [],
+        "warm": s.keep_warm,
+        "design": s.design,
+        "ram_freed_mb": s.trim.get("freed_mb", 0),
+        "steps": s.steps.summary(),
+        "trace": list(s.trace),
+    }}
+
+
+PIPELINE = (Graph("chat pipeline")
+            .add_node("intake", _p_intake, "Intake")
+            .add_node("vision", _p_vision, "Read images")
+            .add_node("attachments", _p_attachments, "Pick relevant parts of attachments")
+            .add_node("route", _p_route, "Choose a specialist")
+            .add_node("load", _p_load, "Free RAM, check the model fits")
+            .add_node("prompt", _p_prompt, "Build the prompt (tools, continuation)")
+            .add_node("answer", _p_answer, "Answer (tool loop, refine loop)")
+            .add_node("finish", _p_finish, "Remember and reply")
+            .set_entry("intake")
+            .add_branch("intake", lambda s: "vision" if s.images else "attachments", ("vision", "attachments"))
+            .add_edge("vision", "attachments")
+            .add_edge("attachments", "route")
+            .add_edge("route", "load")
+            .add_edge("load", "prompt")
+            .add_edge("prompt", "answer")
+            .add_edge("answer", "finish")
+            .add_edge("finish", END)
+            .validate())
 
 
 VISION_PROMPT = ("Look at the image carefully. First transcribe ALL readable text exactly as written (code, error "
@@ -1010,83 +1056,118 @@ def _check_step(text, steps, version=None):
 def _refine(model, system, transcript, request, draft, cancel, num_ctx, keep_alive, think, steps, critique=True):
     """Deep thinking: check, critique and revise the draft until nothing is wrong (bounded).
 
+    Runs REFINE_GRAPH, a cyclic orchestration graph: check -> review -> decide -> revise -> check ...
     Each round restates the original request (so the model cannot drift), feeds the automatic check
-    results back as certain facts, and stops early once the checks pass and the critique says NO ISSUES.
-    A revision that makes the checks worse is thrown away. Reasoning models skip the critique (they
-    already reasoned) and are only revised when the checks find a real problem.
+    results back as certain facts, and stops early once the checks pass and the review says NO ISSUES,
+    or when a revision changes nothing. Reasoning models skip the review (they already reasoned) and are
+    only revised when the checks find a real problem.
     Returns (final_text, generations) via `yield from`.
     """
-    req, generations, previous, settled, carry = _quote(request), 0, None, False, []
-    for version in range(1, config.REFINE_MAX_ROUNDS + 2):
-        found = yield from _check_step(draft, steps, version)
-        introduced = [i for i in found["issues"] if previous and i not in previous[1]]
-        if previous and len(found["issues"]) > len(previous[1]) and any(not _is_math_issue(i) for i in introduced):
-            # the rewrite broke code or markup: go back to the earlier version and (rounds permitting) try again,
-            # naming the mistake to avoid. Arithmetic slips do NOT send it back: in real runs the first draft had
-            # an error no check can see (a wrong time span), the review caught it, and the rewrite fixed that
-            # but slipped on one division; going back kept the wrong answer. The slip is fed back instead.
-            carry = [f"An attempted rewrite introduced this mistake; do not repeat it: {i}" for i in introduced]
-            draft = previous[0]
-            yield from steps.instant(f"Kept version {previous[2]}", "the revision broke the code", "warn")
-            if version > config.REFINE_MAX_ROUNDS:
-                break
-            found = checks.run_checks(draft)
-            settled = False
-        if settled and not found["issues"]:
-            yield from steps.instant(f"Version {version} settled", "almost no change from the last version")
+    s = State(model=model, system=system, transcript=transcript, req=_quote(request), draft=draft, cancel=cancel,
+              num_ctx=num_ctx, keep_alive=keep_alive, think=think, steps=steps, critique=critique, version=1,
+              generations=0, previous=None, settled=False, carry=[], problems=[], found=None, finished=False)
+    yield from REFINE_GRAPH.run(s, stop=_cancelled)
+    return s.draft, s.generations
+
+
+def _r_check(s):
+    """Automatic checks on the current version; decides whether the loop is over."""
+    found = yield from _check_step(s.draft, s.steps, s.version)
+    previous = s.previous
+    introduced = [i for i in found["issues"] if previous and i not in previous[1]]
+    if previous and len(found["issues"]) > len(previous[1]) and any(not _is_math_issue(i) for i in introduced):
+        # the rewrite broke code or markup: go back to the earlier version and (rounds permitting) try again,
+        # naming the mistake to avoid. Arithmetic slips do NOT send it back: in real runs the first draft had
+        # an error no check can see (a wrong time span), the review caught it, and the rewrite fixed that
+        # but slipped on one division; going back kept the wrong answer. The slip is fed back instead.
+        s.carry = [f"An attempted rewrite introduced this mistake; do not repeat it: {i}" for i in introduced]
+        s.draft = previous[0]
+        yield from s.steps.instant(f"Kept version {previous[2]}", "the revision broke the code", "warn")
+        if s.version > config.REFINE_MAX_ROUNDS:
+            s.finished = True
+            return
+        found = checks.run_checks(s.draft)
+        s.settled = False
+    if s.settled and not found["issues"]:
+        yield from s.steps.instant(f"Version {s.version} settled", "almost no change from the last version")
+        s.finished = True
+        return
+    if s.version > config.REFINE_MAX_ROUNDS:
+        s.finished = True  # the last revision is checked, not reviewed again
+        return
+    s.previous = (s.draft, list(found["issues"]), s.version if not s.carry else previous[2])
+    s.problems, s.carry, s.found = list(found["issues"]) + s.carry, [], found
+
+
+def _r_review(s):
+    """The model reviews its own version against the original request."""
+    found = s.found
+    if found["issues"]:
+        note = CHECKS_FAILED.format(issues="\n".join(f"- {i}" for i in found["issues"]))
+    elif found["checked"]:
+        note = CHECKS_PASSED.format(langs=", ".join(dict.fromkeys(found["checked"])))
+    else:
+        note = ""
+    yield {"type": "phase", "phase": "reviewing", "model": s.model}
+    text, _ = yield from _stream_model(
+        s.model, CRITIQUE_PROMPT.format(prompt=s.transcript, version=s.version, draft=s.draft, checks=note,
+                                        request=s.req),
+        s.system, s.cancel, False, s.num_ctx, s.keep_alive, s.think, silent=True, steps=s.steps,
+        label=f"Reviewing version {s.version}", temperature=0.2)
+    s.generations += 1
+    text = _TOOL_LINE.sub("", text).strip()
+    if text and not _NO_ISSUES.search(re.sub(r"^[\s*#>`\"'_:-]+", "", text).upper()):
+        s.problems.append(text)
+
+
+def _r_decide(s):
+    if not s.problems:
+        yield from s.steps.instant(f"Version {s.version} passed review", "no problems left")
+        s.finished = True
+
+
+def _r_revise(s):
+    """The model rewrites the answer, fixing every problem found; a rewrite that drops the work is refused."""
+    yield {"type": "phase", "phase": "revising", "model": s.model}
+    listed = "\n".join(p if p.lstrip().startswith(("-", "*")) else f"- {p}" for p in s.problems)
+    text = ""
+    for attempt in range(2):
+        text, _ = yield from _stream_model(
+            s.model, REVISE_PROMPT.format(prompt=s.transcript, draft=s.draft, request=s.req, problems=listed),
+            s.system, s.cancel, False, s.num_ctx, s.keep_alive, s.think, silent=True, steps=s.steps,
+            label=f"Writing version {s.version + 1}" + (" again" if attempt else ""))
+        s.generations += 1
+        if _cancelled(s):
+            return
+        text = _TOOL_LINE.sub("", text).strip()
+        if not _dropped_the_work(s.draft, text):
             break
-        if version > config.REFINE_MAX_ROUNDS:
-            break  # the last revision is checked, not critiqued again
-        previous = (draft, list(found["issues"]), version if not carry else previous[2])
-        problems, carry = list(found["issues"]) + carry, []
-        if critique:
-            if found["issues"]:
-                note = CHECKS_FAILED.format(issues="\n".join(f"- {i}" for i in found["issues"]))
-            elif found["checked"]:
-                note = CHECKS_PASSED.format(langs=", ".join(dict.fromkeys(found["checked"])))
-            else:
-                note = ""
-            yield {"type": "phase", "phase": "reviewing", "model": model}
-            text, _ = yield from _stream_model(
-                model, CRITIQUE_PROMPT.format(prompt=transcript, version=version, draft=draft, checks=note,
-                                              request=req),
-                system, cancel, False, num_ctx, keep_alive, think, silent=True, steps=steps,
-                label=f"Reviewing version {version}", temperature=0.2)
-            generations += 1
-            if cancel is not None and cancel.is_set():
-                return draft, generations
-            text = _TOOL_LINE.sub("", text).strip()
-            if text and not _NO_ISSUES.search(re.sub(r"^[\s*#>`\"'_:-]+", "", text).upper()):
-                problems.append(text)
-        if not problems:
-            yield from steps.instant(f"Version {version} passed review", "no problems left")
-            break
-        yield {"type": "phase", "phase": "revising", "model": model}
-        listed = "\n".join(p if p.lstrip().startswith(("-", "*")) else f"- {p}" for p in problems)
-        for attempt in range(2):
-            text, _ = yield from _stream_model(
-                model, REVISE_PROMPT.format(prompt=transcript, draft=draft, request=req, problems=listed),
-                system, cancel, False, num_ctx, keep_alive, think, silent=True, steps=steps,
-                label=f"Writing version {version + 1}" + (" again" if attempt else ""))
-            generations += 1
-            if cancel is not None and cancel.is_set():
-                return draft, generations
-            text = _TOOL_LINE.sub("", text).strip()
-            if not _dropped_the_work(draft, text):
-                break
-            # a real run: each revision was only "**Final Answer:** 79.8 km/h" (12 tokens), the working was gone,
-            # so the arithmetic check had nothing left to verify and a wrong number survived
-            yield from steps.instant(f"Rejected version {version + 1}", "it dropped the working", "warn")
-            listed += "\n- " + DROPPED_WORK
-            text = ""
-        if not text:
-            break  # two attempts dropped the work: keep the last complete version
-        # the revision changed next to nothing: another review would only nitpick (a real run spent
-        # 3 rounds, 14 extra minutes, polishing an answer that was right from the start)
-        settled = bool(text) and _converged(draft, text)
-        if text:
-            draft = text
-    return draft, generations
+        # a real run: each revision was only "**Final Answer:** 79.8 km/h" (12 tokens), the working was gone,
+        # so the arithmetic check had nothing left to verify and a wrong number survived
+        yield from s.steps.instant(f"Rejected version {s.version + 1}", "it dropped the working", "warn")
+        listed += "\n- " + DROPPED_WORK
+        text = ""
+    if not text:
+        s.finished = True  # two attempts dropped the work (or nothing came back): keep the last complete version
+        return
+    # a revision that changes next to nothing: another review would only nitpick (a real run spent
+    # 3 rounds, 14 extra minutes, polishing an answer that was right from the start)
+    s.settled = _converged(s.draft, text)
+    s.draft, s.version = text, s.version + 1
+
+
+REFINE_GRAPH = (Graph("deep thinking refine loop")
+                .add_node("check", _r_check, "Automatic checks (code, HTML, JSON, arithmetic, times)")
+                .add_node("review", _r_review, "Model reviews against the request")
+                .add_node("decide", _r_decide, "Anything left to fix?")
+                .add_node("revise", _r_revise, "Model rewrites the answer")
+                .set_entry("check")
+                .add_branch("check", lambda s: END if s.finished else ("review" if s.critique else "decide"),
+                            ("review", "decide", END))
+                .add_edge("review", "decide")
+                .add_branch("decide", lambda s: END if s.finished else "revise", ("revise", END))
+                .add_branch("revise", lambda s: END if s.finished else "check", ("check", END))
+                .validate())
 
 
 def _is_math_issue(issue: str) -> bool:
@@ -1170,130 +1251,154 @@ def _emit(text: str) -> Iterator[dict]:
 
 def _answer(model, system, prompt, request, use_tools, cancel, think, reflect, keep_warm, steps=None,
             conversation=None, record=None):
-    """Generate the answer, running up to CHAT_MAX_TOOL_ROUNDS rounds of tools (the loop).
+    """Generate the answer, running up to CHAT_MAX_TOOL_ROUNDS rounds of tools.
 
+    Runs TOOL_LOOP, an orchestration graph: generate -> (tool calls? tools -> generate : finalize).
     Loop engineering:
       * early exit: a document / chart / push request ends the answer at once
       * bounded: the last round must answer; repeating an identical call is skipped, not re-run
       * compaction + re-injection: older results are shortened, the request is restated each round
-      * refine loop (deep thinking): draft -> automatic checks -> critique -> revise, see _refine;
-        document content is reviewed once before it is saved
-      * warm model: kept loaded between rounds, unloaded afterwards unless you asked to keep it warm
+      * refine loop (deep thinking): REFINE_GRAPH, see _refine; document content is reviewed once before
+        it is saved
+      * warm model: kept loaded between rounds and for a follow-up afterwards
     Returns (reply, tools_used, files_created, generations) via `yield from`.
     """
-    steps = steps or Steps()
-    num_ctx = config.TOOL_NUM_CTX if use_tools else config.DEFAULT_NUM_CTX
-    keep_alive = config.WARM_KEEP_ALIVE if keep_warm else config.IDLE_KEEP_ALIVE
-    transcript, rounds, used, created, seen = prompt, [], [], [], set()
-    generations, force_answer, state = 0, False, {}
+    s = State(model=model, system=system, prompt=prompt, request=request, use_tools=use_tools, cancel=cancel,
+              think=think, reflect=reflect, steps=steps or Steps(), conversation=conversation, record=record,
+              num_ctx=config.TOOL_NUM_CTX if use_tools else config.DEFAULT_NUM_CTX,
+              keep_alive=config.WARM_KEEP_ALIVE if keep_warm else config.IDLE_KEEP_ALIVE,
+              transcript=prompt, rounds=[], used=[], created=[], seen=set(), generations=0, force_answer=False,
+              tool_state={}, round_no=0, calls=[], reply="")
     try:
-        for round_no in range(1, config.CHAT_MAX_TOOL_ROUNDS + 1):
-            last = round_no == config.CHAT_MAX_TOOL_ROUNDS or force_answer
-            if round_no > 1:
-                yield {"type": "phase", "phase": "generating", "model": model}
-            label = "Writing a first draft" if reflect else ("Writing the answer" if round_no == 1 else
-                                                             "Continuing with the tool results")
-            text, streamed = yield from _stream_model(
-                model, transcript, system, cancel, use_tools and not last, num_ctx, keep_alive, think,
-                silent=reflect, steps=steps, label=label, history_messages=conversation)
-            if record is not None:  # the exact exchange the model now holds in its cache
-                record.update(prompt=transcript, text=text)
-            generations += 1
-            if cancel is not None and cancel.is_set():
-                return "", used, created, generations
-            calls = tools.parse_tool_calls(text) if use_tools and not last else []
-            if not calls:
-                final = _TOOL_LINE.sub("", text).strip() if use_tools else text.strip()
-                if think and final:
-                    refined, extra = yield from _refine(model, system, transcript, request, final, cancel, num_ctx,
-                                                        keep_alive, think, steps, critique=reflect)
-                    generations += extra
-                    if cancel is not None and cancel.is_set():
-                        return "", used, created, generations
-                    if refined != final or not streamed:
-                        if streamed:
-                            yield {"type": "reset"}
-                        yield {"type": "phase", "phase": "generating", "model": model}
-                        yield from _emit(refined)
-                    final = refined
-                elif final:
-                    yield from _check_step(final, steps)  # fast mode: the checks cost nothing, so show them
-                if not final and rounds:
-                    # The model still only wanted tools: be honest and show what they returned.
-                    found = "\n\n".join(r.split("\n", 2)[-1].strip() for r in rounds[-1])
-                    final = "I ran out of tool steps before writing an answer. Here is what the tools returned:\n\n" + found[:1500]
-                return final, used, created, generations
-            if streamed:
-                yield {"type": "reset"}
-
-            before = documents.snapshot()
-            results, finished, fresh_calls = [], True, 0
-            for name, args, kwargs in calls:
-                shown = ", ".join([repr(a)[:80] for a in args] + [f"{k}={v!r}"[:120] for k, v in kwargs.items()])
-                real = tools.resolve_tool_name(name, tools.MODEL_TOOLS) or name
-                key = (real, json.dumps([args, kwargs], sort_keys=True, default=str))
-                if key in seen:
-                    result = DUPLICATE_CALL
-                    finished = False
-                elif real in _FILE_TOOLS and not _FILE_REQUEST.search(request):
-                    # a real run: asked only for "the git status", the model made git_status_report.docx
-                    result = UNREQUESTED_FILE
-                    finished = False
-                    yield from steps.instant(f"Skipped {real}", "you did not ask for a file", "warn")
-                else:
-                    seen.add(key)
-                    fresh_calls += 1
-                    if real == "create_document" and think:
-                        args, kwargs = list(args), dict(kwargs)
-                        content = kwargs.get("content", args[2] if len(args) > 2 else "")
-                        if isinstance(content, str) and len(content) >= config.DOC_REVIEW_MIN_CHARS:
-                            filename = kwargs.get("filename", args[0] if args else "the document")
-                            content = yield from _review_document(model, system, transcript, request, filename,
-                                                                  content, cancel, num_ctx, keep_alive, steps)
-                            generations += 1
-                            if cancel is not None and cancel.is_set():
-                                return "", used, created, generations
-                            if len(args) > 2:
-                                args[2] = content
-                            else:
-                                kwargs["content"] = content
-                    yield {"type": "phase", "phase": "running_tool", "tool": name, "args": shown}
-                    label = ("Waiting for your approval to push" if real == "git_push_request"
-                             else f"Running {real or name}")
-                    sid, event = steps.start(label, shown[:160])
-                    yield event
-                    result = yield from _run_tool(name, args, kwargs, cancel, state)
-                    if cancel is not None and cancel.is_set():
-                        return "", used, created, generations
-                    used.append(real)
-                    ok = not result.lower().startswith(("error", "blocked", "web search failed"))
-                    if real not in tools.FINAL_TOOLS or not ok:
-                        finished = False
-                    yield {"type": "step_token", "id": sid, "text": result[:1500]}
-                    yield steps.done(sid, "done" if ok else "error")
-                    yield {"type": "tool", "name": real, "args": shown, "result": result[:1500]}
-                results.append(TOOL_RESULT.format(call=f"{name}({shown})", result=result))
-            fresh = documents.new_files(before)
-            if fresh:
-                created.extend(f for f in fresh if f not in created)
-                yield {"type": "files", "files": list(created)}
-            missing = [ext for ext in documents.requested_outputs(request)
-                       if not any(f.lower().endswith(ext) for f in created)]
-            if finished and not missing:
-                # The tool did the job: answer from its results instead of another slow model call.
-                return "\n\n".join(r.split("\n", 2)[-1].strip() for r in results), used, created, generations
-            rounds.append(results)
-            force_answer = fresh_calls == 0  # the model is going in circles: make it answer next round
-            next_is_last = force_answer or round_no + 1 == config.CHAT_MAX_TOOL_ROUNDS
-            follow = TOOL_LAST_ROUND if next_is_last else TOOL_CONTINUE
-            if missing and not next_is_last:
-                follow = (f"\n\nCreated so far: {', '.join(created) or 'nothing'}. The request also asks for "
-                          f"{', '.join(missing)} file(s), which do not exist yet: create them now with the tools.")
-            transcript = _transcript(prompt, rounds, request, follow)
-        return "", used, created, generations
+        yield from TOOL_LOOP.run(s, stop=_cancelled)
+        return ("" if _cancelled(s) else s.reply), s.used, s.created, s.generations
     finally:
-        if keep_alive in ("0", 0):
+        if s.keep_alive in ("0", 0):
             ollama_client.unload(model)  # configured to give the RAM back at once
+
+
+def _t_generate(s):
+    """One model call: an answer, or tool calls (held back from the chat)."""
+    s.round_no += 1
+    s.last = s.round_no == config.CHAT_MAX_TOOL_ROUNDS or s.force_answer
+    if s.round_no > 1:
+        yield {"type": "phase", "phase": "generating", "model": s.model}
+    label = "Writing a first draft" if s.reflect else ("Writing the answer" if s.round_no == 1 else
+                                                       "Continuing with the tool results")
+    s.text, s.streamed = yield from _stream_model(
+        s.model, s.transcript, s.system, s.cancel, s.use_tools and not s.last, s.num_ctx, s.keep_alive, s.think,
+        silent=s.reflect, steps=s.steps, label=label, history_messages=s.conversation)
+    if s.record is not None:  # the exact exchange the model now holds in its cache
+        s.record.update(prompt=s.transcript, text=s.text)
+    s.generations += 1
+    s.calls = tools.parse_tool_calls(s.text) if s.use_tools and not s.last else []
+
+
+def _t_finalize(s):
+    """The model answered: refine it (deep thinking) or show the free checks (fast mode)."""
+    final = _TOOL_LINE.sub("", s.text).strip() if s.use_tools else s.text.strip()
+    if s.think and final:
+        refined, extra = yield from _refine(s.model, s.system, s.transcript, s.request, final, s.cancel, s.num_ctx,
+                                            s.keep_alive, s.think, s.steps, critique=s.reflect)
+        s.generations += extra
+        if _cancelled(s):
+            return
+        if refined != final or not s.streamed:
+            if s.streamed:
+                yield {"type": "reset"}
+            yield {"type": "phase", "phase": "generating", "model": s.model}
+            yield from _emit(refined)
+        final = refined
+    elif final:
+        yield from _check_step(final, s.steps)  # fast mode: the checks cost nothing, so show them
+    if not final and s.rounds:
+        # The model still only wanted tools: be honest and show what they returned.
+        found = "\n\n".join(r.split("\n", 2)[-1].strip() for r in s.rounds[-1])
+        final = "I ran out of tool steps before writing an answer. Here is what the tools returned:\n\n" + found[:1500]
+    s.reply = final
+
+
+def _t_tools(s):
+    """Run the requested tools; finish early if they did the job, else prepare the next round."""
+    steps = s.steps
+    if s.streamed:
+        yield {"type": "reset"}
+    before = documents.snapshot()
+    results, finished, fresh_calls = [], True, 0
+    for name, args, kwargs in s.calls:
+        shown = ", ".join([repr(a)[:80] for a in args] + [f"{k}={v!r}"[:120] for k, v in kwargs.items()])
+        real = tools.resolve_tool_name(name, tools.MODEL_TOOLS) or name
+        key = (real, json.dumps([args, kwargs], sort_keys=True, default=str))
+        if key in s.seen:
+            result = DUPLICATE_CALL
+            finished = False
+        elif real in _FILE_TOOLS and not _FILE_REQUEST.search(s.request):
+            # a real run: asked only for "the git status", the model made git_status_report.docx
+            result = UNREQUESTED_FILE
+            finished = False
+            yield from steps.instant(f"Skipped {real}", "you did not ask for a file", "warn")
+        else:
+            s.seen.add(key)
+            fresh_calls += 1
+            if real == "create_document" and s.think:
+                args, kwargs = list(args), dict(kwargs)
+                content = kwargs.get("content", args[2] if len(args) > 2 else "")
+                if isinstance(content, str) and len(content) >= config.DOC_REVIEW_MIN_CHARS:
+                    filename = kwargs.get("filename", args[0] if args else "the document")
+                    content = yield from _review_document(s.model, s.system, s.transcript, s.request, filename,
+                                                          content, s.cancel, s.num_ctx, s.keep_alive, steps)
+                    s.generations += 1
+                    if _cancelled(s):
+                        return
+                    if len(args) > 2:
+                        args[2] = content
+                    else:
+                        kwargs["content"] = content
+            yield {"type": "phase", "phase": "running_tool", "tool": name, "args": shown}
+            label = "Waiting for your approval to push" if real == "git_push_request" else f"Running {real or name}"
+            sid, event = steps.start(label, shown[:160])
+            yield event
+            result = yield from _run_tool(name, args, kwargs, s.cancel, s.tool_state)
+            if _cancelled(s):
+                return
+            s.used.append(real)
+            ok = not result.lower().startswith(("error", "blocked", "web search failed"))
+            if real not in tools.FINAL_TOOLS or not ok:
+                finished = False
+            yield {"type": "step_token", "id": sid, "text": result[:1500]}
+            yield steps.done(sid, "done" if ok else "error")
+            yield {"type": "tool", "name": real, "args": shown, "result": result[:1500]}
+        results.append(TOOL_RESULT.format(call=f"{name}({shown})", result=result))
+    fresh = documents.new_files(before)
+    if fresh:
+        s.created.extend(f for f in fresh if f not in s.created)
+        yield {"type": "files", "files": list(s.created)}
+    missing = [ext for ext in documents.requested_outputs(s.request)
+               if not any(f.lower().endswith(ext) for f in s.created)]
+    if finished and not missing:
+        # The tool did the job: answer from its results instead of another slow model call.
+        s.reply, s.done = "\n\n".join(r.split("\n", 2)[-1].strip() for r in results), True
+        return
+    s.rounds.append(results)
+    s.force_answer = fresh_calls == 0  # the model is going in circles: make it answer next round
+    next_is_last = s.force_answer or s.round_no + 1 == config.CHAT_MAX_TOOL_ROUNDS
+    follow = TOOL_LAST_ROUND if next_is_last else TOOL_CONTINUE
+    if missing and not next_is_last:
+        follow = (f"\n\nCreated so far: {', '.join(s.created) or 'nothing'}. The request also asks for "
+                  f"{', '.join(missing)} file(s), which do not exist yet: create them now with the tools.")
+    s.transcript = _transcript(s.prompt, s.rounds, s.request, follow)
+
+
+TOOL_LOOP = (Graph("tool loop")
+             .add_node("generate", _t_generate, "Model writes (an answer or tool calls)")
+             .add_node("tools", _t_tools, "Run the tools")
+             .add_node("finalize", _t_finalize, "Refine or check the answer")
+             .set_entry("generate")
+             .add_branch("generate", lambda s: "tools" if s.calls else "finalize", ("tools", "finalize"))
+             .add_branch("tools", lambda s: END if s.get("done") or s.round_no >= config.CHAT_MAX_TOOL_ROUNDS
+                         else "generate", ("generate", END))
+             .add_edge("finalize", END)
+             .validate())
 
 
 def run_blocking(message: str, context: str = "", deep: bool = False) -> dict:

@@ -751,6 +751,14 @@ def status():
     }
 
 
+@app.get("/api/graph")
+def orchestration_graph():
+    """The orchestration graphs the chat runs on: nodes and edges, as data (and Mermaid)."""
+    graphs = {"pipeline": router_engine.PIPELINE, "tool_loop": router_engine.TOOL_LOOP,
+              "refine": router_engine.REFINE_GRAPH}
+    return {key: {**g.describe(), "mermaid": g.mermaid()} for key, g in graphs.items()}
+
+
 @app.get("/api/system/live")
 def system_live():
     """CPU load, RAM use, model RAM and CPU temperature for the sidebar meters (polled every 2 s)."""
